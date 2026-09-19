@@ -1,0 +1,38 @@
+# Minimal quality gate: formatter, linter, and the full test suite — offline.
+#
+# The suite must pass with no AWS credentials (they are pinned to empty
+# values below to prove nothing needs them) and without boto3 installed
+# (the core install only): the one botocore-Stubber test skips cleanly and
+# every other AWS-facing test uses scripted fake clients. The type checker
+# (mypy, configured in pyproject.toml) is not run here yet — it has not had
+# a verified local run; add it once `python -m mypy` passes locally.
+name: tests
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    env:
+      # Deliberately empty: the tests must never use real credentials.
+      AWS_ACCESS_KEY_ID: ""
+      AWS_SECRET_ACCESS_KEY: ""
+      AWS_SESSION_TOKEN: ""
+      AWS_PROFILE: ""
+      AWS_REGION: ""
+      AWS_DEFAULT_REGION: ""
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install core package and dev tools (no boto3)
+        run: python -m pip install -e . pytest ruff
+      - name: Formatter check
+        run: python -m ruff format --check src tests
+      - name: Linter
+        run: python -m ruff check src tests
+      - name: Tests (offline, no AWS credentials)
+        run: python -m pytest

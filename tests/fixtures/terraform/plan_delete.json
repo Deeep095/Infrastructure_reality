@@ -1,0 +1,49 @@
+{
+  "format_version": "1.2",
+  "terraform_version": "1.9.5",
+  "planned_values": {
+    "root_module": {
+      "resources": [
+        {
+          "address": "aws_security_group.web_sg",
+          "mode": "managed",
+          "type": "aws_security_group",
+          "name": "web_sg",
+          "values": {
+            "id": "sg-0aaa111",
+            "arn": "arn:aws:ec2:eu-west-1:123456789012:security-group/sg-0aaa111",
+            "name": "web-sg"
+          }
+        }
+      ]
+    }
+  },
+  "resource_changes": [
+    {
+      "address": "aws_db_instance.primary",
+      "mode": "managed",
+      "type": "aws_db_instance",
+      "name": "primary",
+      "change": {
+        "actions": ["delete"],
+        "before": {
+          "id": "primary",
+          "arn": "arn:aws:rds:eu-west-1:123456789012:db:primary",
+          "vpc_security_group_ids": ["sg-0aaa111"]
+        },
+        "after": null
+      }
+    },
+    {
+      "address": "aws_security_group.web_sg",
+      "mode": "managed",
+      "type": "aws_security_group",
+      "name": "web_sg",
+      "change": {
+        "actions": ["no-op"],
+        "before": {"id": "sg-0aaa111"},
+        "after": {"id": "sg-0aaa111"}
+      }
+    }
+  ]
+}

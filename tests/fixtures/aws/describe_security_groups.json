@@ -1,0 +1,27 @@
+{
+  "pages": [
+    {
+      "SecurityGroups": [
+        {
+          "GroupId": "sg-0aaa111",
+          "GroupName": "web-sg",
+          "Description": "HTTP/HTTPS from anywhere",
+          "Tags": [
+            {"Key": "Name", "Value": "web-sg"}
+          ]
+        }
+      ],
+      "NextToken": "sg-page-2"
+    },
+    {
+      "SecurityGroups": [
+        {
+          "GroupId": "sg-0bbb222",
+          "GroupName": "db-sg",
+          "Description": "Database access from app tier",
+          "Tags": []
+        }
+      ]
+    }
+  ]
+}

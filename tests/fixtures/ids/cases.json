@@ -1,0 +1,107 @@
+{
+  "arns": [
+    {
+      "arn": "arn:aws:ec2:eu-west-1:123456789012:instance/i-0abc123def456",
+      "key": "aws/ec2/instance/eu-west-1/123456789012/i-0abc123def456"
+    },
+    {
+      "arn": "arn:aws:lambda:us-east-1:123456789012:function:process-orders",
+      "key": "aws/lambda/function/us-east-1/123456789012/process-orders"
+    },
+    {
+      "arn": "arn:aws:rds:ap-south-1:123456789012:db:prod-db",
+      "key": "aws/rds/db/ap-south-1/123456789012/prod-db"
+    },
+    {
+      "arn": "arn:aws:s3:::acme-customer-data",
+      "key": "aws/s3/bucket/-/-/acme-customer-data"
+    },
+    {
+      "arn": "arn:aws:iam::123456789012:role/deploy-role",
+      "key": "aws/iam/role/-/123456789012/deploy-role"
+    },
+    {
+      "arn": "arn:aws:ec2:us-west-2:123456789012:security-group/sg-1234abcd",
+      "key": "aws/ec2/security-group/us-west-2/123456789012/sg-1234abcd"
+    },
+    {
+      "arn": "arn:aws-us-gov:ec2:us-gov-west-1:123456789012:instance/i-gov001",
+      "key": "aws-us-gov/ec2/instance/us-gov-west-1/123456789012/i-gov001"
+    },
+    {
+      "arn": "arn:aws:ec2:eu-west-1::instance/i-noaccount",
+      "key": "aws/ec2/instance/eu-west-1/-/i-noaccount"
+    }
+  ],
+  "malformed_arns": [
+    "i-0abc123def456",
+    "arn:aws:ec2:eu-west-1:123456789012",
+    "arn:aws:s3:::",
+    "arn:not-a-partition:x:region:1:thing/id",
+    "arn:aws:EC2:eu-west-1:123456789012:instance/i-1",
+    "arn:aws:s3:::acme-customer-*",
+    "arn:aws:s3:::acme-?-data"
+  ],
+  "terraform_addresses": [
+    {
+      "address": "aws_instance.web",
+      "key": "terraform/aws/aws_instance/-/-/aws_instance.web"
+    },
+    {
+      "address": "module.vpc.aws_instance.web[0]",
+      "key": "terraform/aws/aws_instance/-/-/module.vpc.aws_instance.web[0]"
+    },
+    {
+      "address": "data.aws_ami.ubuntu",
+      "key": "terraform/aws/aws_ami/-/-/data.aws_ami.ubuntu"
+    },
+    {
+      "address": "aws_s3_bucket.data[\"primary\"]",
+      "key": "terraform/aws/aws_s3_bucket/-/-/aws_s3_bucket.data[\"primary\"]"
+    },
+    {
+      "address": "module.app.module.db.aws_db_instance.primary[*]",
+      "key": "terraform/aws/aws_db_instance/-/-/module.app.module.db.aws_db_instance.primary[*]"
+    }
+  ],
+  "malformed_terraform_addresses": [
+    "aws_instance",
+    "module.vpc",
+    ".web",
+    "aws_instance.web[unclosed",
+    "aws_instance..web",
+    "not a valid address",
+    ""
+  ],
+  "native": [
+    {
+      "service": "ec2",
+      "resource_type": "instance",
+      "resource_id": "i-0abc123def456",
+      "region": "eu-west-1",
+      "account": "123456789012",
+      "key": "aws/ec2/instance/eu-west-1/123456789012/i-0abc123def456"
+    },
+    {
+      "service": "lambda",
+      "resource_type": "function",
+      "resource_id": "process-orders",
+      "region": "us-east-1",
+      "account": "123456789012",
+      "key": "aws/lambda/function/us-east-1/123456789012/process-orders"
+    },
+    {
+      "service": "s3",
+      "resource_type": "bucket",
+      "resource_id": "acme-customer-data",
+      "region": null,
+      "account": null,
+      "key": "aws/s3/bucket/-/-/acme-customer-data"
+    }
+  ],
+  "unresolved_references": [
+    "arn:aws:s3:::acme-customer-*",
+    "data.example.com",
+    "arn:aws:iam::999999999999:role/other-account-role"
+  ]
+}

@@ -1,0 +1,32 @@
+{
+  "pages": [
+    {
+      "DBInstances": [
+        {
+          "DBInstanceIdentifier": "primary",
+          "DBInstanceArn": "arn:aws:rds:eu-west-1:123456789012:db:primary",
+          "Engine": "postgres",
+          "DBInstanceStatus": "available",
+          "MasterUsername": "admin",
+          "MasterUserPassword": "super-seeker-password-fixture-only",
+          "VpcSecurityGroups": [
+            {"VpcSecurityGroupId": "sg-0aaa111", "Status": "active"}
+          ]
+        }
+      ],
+      "Marker": "db-page-2"
+    },
+    {
+      "DBInstances": [
+        {
+          "DBInstanceIdentifier": "reporting",
+          "DBInstanceArn": "arn:aws:rds:eu-west-1:123456789012:db:reporting",
+          "Engine": "mysql",
+          "DBInstanceStatus": "available",
+          "MasterUsername": "reporting",
+          "VpcSecurityGroups": []
+        }
+      ]
+    }
+  ]
+}

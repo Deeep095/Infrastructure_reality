@@ -1,0 +1,33 @@
+{
+  "RoleName": "auditor_role",
+  "PolicyName": "auditor-inline",
+  "PolicyDocument": {
+    "Version": "2012-10-17",
+    "Statement": [
+      "not-a-statement",
+      {
+        "Sid": "BadEffect",
+        "Effect": "Maybe",
+        "Action": "s3:GetObject",
+        "Resource": "arn:aws:s3:::audit-logs"
+      },
+      {
+        "Sid": "MissingResource",
+        "Effect": "Allow",
+        "Action": "s3:GetObject"
+      },
+      {
+        "Sid": "DuplicatedResource",
+        "Effect": "Allow",
+        "Action": ["s3:ListBucket"],
+        "Resource": ["arn:aws:s3:::audit-logs", "arn:aws:s3:::audit-logs"]
+      },
+      {
+        "Sid": "BadAction",
+        "Effect": "Allow",
+        "Action": 42,
+        "Resource": "arn:aws:s3:::audit-logs"
+      }
+    ]
+  }
+}

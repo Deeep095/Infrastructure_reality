@@ -1,0 +1,15 @@
+{
+  "RoleName": "processor_role",
+  "PolicyName": "processor-readonly",
+  "PolicyDocument": {
+    "Version": "2012-10-17",
+    "Statement": [
+      {
+        "Sid": "DescribeAnything",
+        "Effect": "Allow",
+        "Action": "rds:DescribeDBInstances",
+        "Resource": "*"
+      }
+    ]
+  }
+}

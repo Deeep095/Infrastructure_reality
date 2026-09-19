@@ -1,0 +1,13 @@
+{
+  "RoleName": "cleanup_role",
+  "PolicyName": "cleanup-inline",
+  "PolicyDocument": {
+    "Version": "2012-10-17",
+    "Statement": {
+      "Sid": "DeleteTasks",
+      "Effect": "Allow",
+      "Action": "dynamodb:DeleteItem",
+      "Resource": "arn:aws:dynamodb:eu-west-1:123456789012:table/cleanup-tasks"
+    }
+  }
+}

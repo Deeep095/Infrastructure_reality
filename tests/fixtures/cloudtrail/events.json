@@ -1,0 +1,59 @@
+{
+  "Events": [
+    {
+      "EventId": "ct-0001-resolvable",
+      "EventName": "PutObject",
+      "EventSource": "s3.amazonaws.com",
+      "EventTime": "2026-03-01T10:15:00Z",
+      "Username": "processor_role-session",
+      "ReadOnly": false,
+      "Resources": [
+        {
+          "ResourceType": "AWS::S3::Bucket",
+          "ResourceName": "arn:aws:s3:::data-lake"
+        }
+      ],
+      "CloudTrailEvent": "{\"eventVersion\": \"1.08\", \"eventTime\": \"2026-03-01T10:15:00Z\", \"eventName\": \"PutObject\", \"requestParameters\": {\"bucketName\": \"data-lake\", \"key\": \"events/2026/03/01.json\"}, \"userIdentity\": {\"type\": \"AssumedRole\", \"principalId\": \"AROAXAMPLE:session-1\", \"arn\": \"arn:aws:sts::123456789012:assumed-role/processor_role/session-1\", \"accountId\": \"123456789012\"}}"
+    },
+    {
+      "EventId": "ct-0002-no-target",
+      "EventName": "ListBuckets",
+      "EventSource": "s3.amazonaws.com",
+      "EventTime": "2026-03-01T10:16:00Z",
+      "Username": "processor_role-session",
+      "ReadOnly": true,
+      "Resources": [],
+      "CloudTrailEvent": "{\"eventVersion\": \"1.08\", \"eventTime\": \"2026-03-01T10:16:00Z\", \"eventName\": \"ListBuckets\", \"userIdentity\": {\"type\": \"AssumedRole\", \"principalId\": \"AROAXAMPLE:session-1\", \"arn\": \"arn:aws:sts::123456789012:assumed-role/processor_role/session-1\", \"accountId\": \"123456789012\"}}"
+    },
+    {
+      "EventId": "ct-0003-malformed",
+      "EventName": "CreateBucket",
+      "EventSource": "s3.amazonaws.com",
+      "EventTime": "2026-03-01T10:17:00Z",
+      "Username": "someuser",
+      "ReadOnly": false,
+      "Resources": [
+        {
+          "ResourceType": "AWS::S3::Bucket",
+          "ResourceName": "arn:aws:s3:::new-bucket"
+        }
+      ],
+      "CloudTrailEvent": "{not valid json"
+    },
+    {
+      "EventId": "ct-0004-unresolvable-target",
+      "EventName": "RunInstances",
+      "EventSource": "ec2.amazonaws.com",
+      "EventTime": "2026-03-01T10:18:00Z",
+      "Username": "processor_role-session",
+      "ReadOnly": false,
+      "Resources": [
+        {
+          "ResourceType": "AWS::EC2::Instance",
+          "ResourceName": "i-0notanarn"
+        }
+      ],
+      "CloudTrailEvent": "{\"eventVersion\": \"1.08\", \"eventTime\": \"2026-03-01T10:18:00Z\", \"eventName\": \"RunInstances\", \"userIdentity\": {\"type\": \"AssumedRole\", \"principalId\": \"AROAXAMPLE:session-1\", \"arn\": \"arn:aws:sts::123456789012:assumed-role/processor_role/session-1\", \"accountId\": \"123456789012\"}}"
+    }
+  ]
+}

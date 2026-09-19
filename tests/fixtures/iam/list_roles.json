@@ -1,0 +1,33 @@
+{
+  "pages": [
+    {
+      "Roles": [
+        {
+          "Path": "/",
+          "RoleName": "processor_role",
+          "Arn": "arn:aws:iam::123456789012:role/processor_role",
+          "CreateDate": "2026-01-05T10:00:00Z"
+        },
+        {
+          "Path": "/",
+          "RoleName": "cleanup_role",
+          "Arn": "arn:aws:iam::123456789012:role/cleanup_role",
+          "CreateDate": "2026-01-06T10:00:00Z"
+        }
+      ],
+      "IsTruncated": true,
+      "Marker": "roles-page-2"
+    },
+    {
+      "Roles": [
+        {
+          "Path": "/",
+          "RoleName": "auditor_role",
+          "Arn": "arn:aws:iam::123456789012:role/auditor_role",
+          "CreateDate": "2026-01-07T10:00:00Z"
+        }
+      ],
+      "IsTruncated": false
+    }
+  ]
+}

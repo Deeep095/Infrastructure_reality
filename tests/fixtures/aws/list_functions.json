@@ -1,0 +1,33 @@
+{
+  "pages": [
+    {
+      "Functions": [
+        {
+          "FunctionName": "processor",
+          "FunctionArn": "arn:aws:lambda:eu-west-1:123456789012:function:processor",
+          "Runtime": "python3.12",
+          "Role": "arn:aws:iam::123456789012:role/processor_role",
+          "Handler": "app.handle",
+          "Environment": {
+            "Variables": {
+              "TABLE_NAME": "events",
+              "API_KEY": "sk-live-abc123-do-not-leak"
+            }
+          }
+        }
+      ],
+      "NextMarker": "fn-page-2"
+    },
+    {
+      "Functions": [
+        {
+          "FunctionName": "cleanup",
+          "FunctionArn": "arn:aws:lambda:eu-west-1:123456789012:function:cleanup",
+          "Runtime": "python3.12",
+          "Role": "arn:aws:iam::123456789012:role/cleanup_role",
+          "Handler": "app.sweep"
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,20 @@
+{
+  "Policy": {
+    "PolicyName": "DataReader",
+    "Arn": "arn:aws:iam::123456789012:policy/DataReader",
+    "DefaultVersionId": "v2",
+    "AttachmentCount": 1,
+    "Versions": [
+      {
+        "VersionId": "v1",
+        "IsDefaultVersion": false,
+        "CreateDate": "2026-01-01T00:00:00Z"
+      },
+      {
+        "VersionId": "v2",
+        "IsDefaultVersion": true,
+        "CreateDate": "2026-02-01T00:00:00Z"
+      }
+    ]
+  }
+}

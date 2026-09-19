@@ -1,0 +1,178 @@
+{
+    "format_version": "1.0",
+    "terraform_version": "1.9.5",
+    "values": {
+        "root_module": {
+            "resources": [
+                {
+                    "address": "aws_vpc.main",
+                    "mode": "managed",
+                    "type": "aws_vpc",
+                    "name": "main",
+                    "values": {
+                        "id": "vpc-01010101",
+                        "arn": "arn:aws:ec2:eu-west-1:123456789012:vpc/vpc-01010101",
+                        "cidr_block": "10.0.0.0/16"
+                    }
+                },
+                {
+                    "address": "aws_security_group.web_sg",
+                    "mode": "managed",
+                    "type": "aws_security_group",
+                    "name": "web_sg",
+                    "values": {
+                        "id": "sg-web0001",
+                        "arn": "arn:aws:ec2:eu-west-1:123456789012:security-group/sg-web0001",
+                        "name": "manual-web-sg",
+                        "description": "Public web tier"
+                    }
+                },
+                {
+                    "address": "aws_security_group.db_sg",
+                    "mode": "managed",
+                    "type": "aws_security_group",
+                    "name": "db_sg",
+                    "values": {
+                        "id": "sg-db0002",
+                        "arn": "arn:aws:ec2:eu-west-1:123456789012:security-group/sg-db0002",
+                        "name": "manual-db-sg",
+                        "description": "Database tier"
+                    }
+                },
+                {
+                    "address": "aws_instance.web",
+                    "mode": "managed",
+                    "type": "aws_instance",
+                    "name": "web",
+                    "values": {
+                        "id": "i-web0001",
+                        "arn": "arn:aws:ec2:eu-west-1:123456789012:instance/i-web0001",
+                        "instance_type": "t3.small",
+                        "vpc_security_group_ids": [
+                            "sg-web0001"
+                        ]
+                    },
+                    "depends_on": [
+                        "aws_security_group.web_sg"
+                    ]
+                },
+                {
+                    "address": "aws_instance.worker",
+                    "mode": "managed",
+                    "type": "aws_instance",
+                    "name": "worker",
+                    "values": {
+                        "id": "i-worker0002",
+                        "arn": "arn:aws:ec2:eu-west-1:123456789012:instance/i-worker0002",
+                        "instance_type": "t3.medium",
+                        "vpc_security_group_ids": [
+                            "sg-web0001"
+                        ]
+                    },
+                    "depends_on": [
+                        "aws_security_group.web_sg",
+                        "aws_instance.web"
+                    ]
+                },
+                {
+                    "address": "aws_iam_role.processor_role",
+                    "mode": "managed",
+                    "type": "aws_iam_role",
+                    "name": "processor_role",
+                    "values": {
+                        "id": "manual-processor-role",
+                        "arn": "arn:aws:iam::123456789012:role/manual-processor-role",
+                        "name": "manual-processor-role"
+                    }
+                },
+                {
+                    "address": "aws_lambda_function.processor",
+                    "mode": "managed",
+                    "type": "aws_lambda_function",
+                    "name": "processor",
+                    "values": {
+                        "id": "manual-processor",
+                        "arn": "arn:aws:lambda:eu-west-1:123456789012:function:manual-processor",
+                        "role": "arn:aws:iam::123456789012:role/manual-processor-role"
+                    },
+                    "depends_on": [
+                        "aws_iam_role.processor_role",
+                        "module.network.aws_security_group.internal_sg"
+                    ]
+                },
+                {
+                    "address": "aws_db_instance.primary",
+                    "mode": "managed",
+                    "type": "aws_db_instance",
+                    "name": "primary",
+                    "values": {
+                        "id": "manual-primary",
+                        "arn": "arn:aws:rds:eu-west-1:123456789012:db:manual-primary",
+                        "engine": "postgres",
+                        "vpc_security_group_ids": [
+                            "sg-db0002"
+                        ]
+                    },
+                    "depends_on": [
+                        "aws_security_group.db_sg"
+                    ]
+                },
+                {
+                    "address": "aws_s3_bucket.data",
+                    "mode": "managed",
+                    "type": "aws_s3_bucket",
+                    "name": "data",
+                    "values": {
+                        "id": "manual-infrastructure-data",
+                        "arn": "arn:aws:s3:::manual-infrastructure-data"
+                    }
+                },
+                {
+                    "address": "aws_cloudfront_distribution.cdn",
+                    "mode": "managed",
+                    "type": "aws_cloudfront_distribution",
+                    "name": "cdn",
+                    "values": {
+                        "id": "E1MANUAL123456"
+                    }
+                }
+            ],
+            "child_modules": [
+                {
+                    "address": "module.network",
+                    "resources": [
+                        {
+                            "address": "module.network.aws_security_group.internal_sg",
+                            "mode": "managed",
+                            "type": "aws_security_group",
+                            "name": "internal_sg",
+                            "values": {
+                                "id": "sg-internal0003",
+                                "arn": "arn:aws:ec2:eu-west-1:123456789012:security-group/sg-internal0003",
+                                "name": "manual-internal-sg",
+                                "description": "Internal services"
+                            }
+                        },
+                        {
+                            "address": "module.network.aws_instance.internal",
+                            "mode": "managed",
+                            "type": "aws_instance",
+                            "name": "internal",
+                            "values": {
+                                "id": "i-internal0004",
+                                "arn": "arn:aws:ec2:eu-west-1:123456789012:instance/i-internal0004",
+                                "instance_type": "t3.micro",
+                                "vpc_security_group_ids": [
+                                    "sg-internal0003"
+                                ]
+                            },
+                            "depends_on": [
+                                "module.network.aws_security_group.internal_sg"
+                            ]
+                        }
+                    ]
+                }
+            ]
+        }
+    }
+}

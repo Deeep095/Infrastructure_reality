@@ -1,0 +1,15 @@
+{
+  "Policy": {
+    "PolicyName": "AuditorAccess",
+    "Arn": "arn:aws:iam::123456789012:policy/AuditorAccess",
+    "DefaultVersionId": "v1",
+    "AttachmentCount": 1,
+    "Versions": [
+      {
+        "VersionId": "v1",
+        "IsDefaultVersion": true,
+        "CreateDate": "2026-01-01T00:00:00Z"
+      }
+    ]
+  }
+}

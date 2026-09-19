@@ -1,0 +1,49 @@
+{
+  "pages": [
+    {
+      "Reservations": [
+        {
+          "ReservationId": "r-0aaaa111",
+          "OwnerId": "123456789012",
+          "Instances": [
+            {
+              "InstanceId": "i-0web",
+              "InstanceType": "t3.micro",
+              "InstanceState": {"Name": "running"},
+              "SecurityGroups": [
+                {"GroupId": "sg-0aaa111", "GroupName": "web-sg"},
+                {"GroupId": "sg-0zzz999", "GroupName": "legacy-sg"}
+              ],
+              "Tags": [
+                {"Key": "Name", "Value": "web-server"},
+                {"Key": "Team", "Value": "platform"}
+              ]
+            }
+          ]
+        }
+      ],
+      "NextToken": "inst-page-2"
+    },
+    {
+      "Reservations": [
+        {
+          "ReservationId": "r-0bbbb222",
+          "OwnerId": "123456789012",
+          "Instances": [
+            {
+              "InstanceId": "i-0batch",
+              "InstanceType": "m5.large",
+              "InstanceState": {"Name": "stopped"},
+              "SecurityGroups": [
+                {"GroupId": "sg-0bbb222", "GroupName": "db-sg"}
+              ],
+              "Tags": [
+                {"Key": "Name", "Value": "batch-worker"}
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

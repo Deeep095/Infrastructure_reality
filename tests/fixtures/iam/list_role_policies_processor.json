@@ -1,0 +1,13 @@
+{
+  "pages": [
+    {
+      "PolicyNames": ["processor-inline"],
+      "IsTruncated": true,
+      "Marker": "pp-page-2"
+    },
+    {
+      "PolicyNames": ["processor-readonly"],
+      "IsTruncated": false
+    }
+  ]
+}

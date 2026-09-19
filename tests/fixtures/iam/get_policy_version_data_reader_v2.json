@@ -1,0 +1,24 @@
+{
+  "PolicyVersion": {
+    "VersionId": "v2",
+    "IsDefaultVersion": true,
+    "CreateDate": "2026-02-01T00:00:00Z",
+    "Document": {
+      "Version": "2012-10-17",
+      "Statement": [
+        {
+          "Sid": "ReadTable",
+          "Effect": "Allow",
+          "Action": ["dynamodb:GetItem", "dynamodb:Query"],
+          "Resource": "arn:aws:dynamodb:eu-west-1:123456789012:table/processed-events"
+        },
+        {
+          "Sid": "HomeBucket",
+          "Effect": "Allow",
+          "Action": "s3:ListBucket",
+          "Resource": "arn:aws:s3:::home/${aws:username}/*"
+        }
+      ]
+    }
+  }
+}

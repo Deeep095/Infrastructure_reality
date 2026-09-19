@@ -1,0 +1,15 @@
+{
+  "Owner": {"DisplayName": "sandbox", "ID": "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2"},
+  "Buckets": [
+    {
+      "Name": "data-lake",
+      "CreationDate": "2025-01-15T10:30:00+00:00",
+      "BucketRegion": "eu-west-1"
+    },
+    {
+      "Name": "static-assets",
+      "CreationDate": "2025-03-02T08:00:00+00:00",
+      "BucketRegion": "us-east-1"
+    }
+  ]
+}

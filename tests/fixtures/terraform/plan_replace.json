@@ -1,0 +1,54 @@
+{
+  "format_version": "1.2",
+  "terraform_version": "1.9.5",
+  "planned_values": {
+    "root_module": {
+      "resources": [
+        {
+          "address": "aws_instance.web",
+          "mode": "managed",
+          "type": "aws_instance",
+          "name": "web",
+          "values": {
+            "id": "(unknown)",
+            "arn": "(unknown)",
+            "instance_type": "t3.small",
+            "vpc_security_group_ids": ["sg-0aaa111"]
+          }
+        }
+      ]
+    }
+  },
+  "resource_changes": [
+    {
+      "address": "aws_instance.web",
+      "mode": "managed",
+      "type": "aws_instance",
+      "name": "web",
+      "change": {
+        "actions": ["delete", "create"],
+        "before": {
+          "id": "i-0abc123def456",
+          "arn": "arn:aws:ec2:eu-west-1:123456789012:instance/i-0abc123def456",
+          "instance_type": "t3.micro"
+        },
+        "after": {
+          "instance_type": "t3.small",
+          "vpc_security_group_ids": ["sg-0aaa111"]
+        },
+        "after_unknown": {"id": true, "arn": true}
+      }
+    },
+    {
+      "address": "aws_lambda_function.processor",
+      "mode": "managed",
+      "type": "aws_lambda_function",
+      "name": "processor",
+      "change": {
+        "actions": ["update"],
+        "before": {"id": "processor", "role": "arn:aws:iam::123456789012:role/processor_role"},
+        "after": {"id": "processor", "role": "arn:aws:iam::123456789012:role/processor_role"}
+      }
+    }
+  ]
+}

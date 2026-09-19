@@ -1,0 +1,46 @@
+{
+  "format_version": "1.2",
+  "terraform_version": "1.9.5",
+  "planned_values": {
+    "root_module": {
+      "resources": [
+        {
+          "address": "aws_iam_role.processor_role",
+          "mode": "managed",
+          "type": "aws_iam_role",
+          "name": "processor_role",
+          "values": {
+            "id": "processor_role",
+            "arn": "arn:aws:iam::123456789012:role/processor_role",
+            "name": "processor_role"
+          }
+        },
+        {
+          "address": "aws_lambda_function.processor",
+          "mode": "managed",
+          "type": "aws_lambda_function",
+          "name": "processor",
+          "values": {
+            "id": "processor",
+            "arn": "(unknown)",
+            "role": "(known after apply)"
+          }
+        }
+      ]
+    }
+  },
+  "resource_changes": [
+    {
+      "address": "aws_lambda_function.processor",
+      "mode": "managed",
+      "type": "aws_lambda_function",
+      "name": "processor",
+      "change": {
+        "actions": ["update"],
+        "before": {"id": "processor", "role": "arn:aws:iam::123456789012:role/old_role"},
+        "after": {"role": "(known after apply)"},
+        "after_unknown": {"arn": true, "role": true}
+      }
+    }
+  ]
+}

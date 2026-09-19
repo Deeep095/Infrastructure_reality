@@ -1,0 +1,9 @@
+{
+  "AttachedPolicies": [
+    {
+      "PolicyName": "AuditorAccess",
+      "PolicyArn": "arn:aws:iam::123456789012:policy/AuditorAccess"
+    }
+  ],
+  "IsTruncated": false
+}

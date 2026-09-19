@@ -1,0 +1,16 @@
+{
+  "format_version": "1.0",
+  "terraform_version": "1.9.5",
+  "values": {
+    "root_module": {
+      "resources": [
+        {
+          "mode": "managed",
+          "type": "aws_instance",
+          "name": "broken",
+          "values": {"id": "i-0broken"}
+        }
+      ]
+    }
+  }
+}
