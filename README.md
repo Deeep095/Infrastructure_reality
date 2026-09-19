@@ -1,7 +1,6 @@
-<<<<<<< HEAD
+
 # Infrastructure_reality
-=======
-# reality
+
 
 Read-only cloud infrastructure discovery and local blast-radius simulation.
 
@@ -164,4 +163,3 @@ The test suite runs entirely offline: AWS-facing tests use scripted fake
 clients (plus one botocore `Stubber` test that skips cleanly when boto3 is not
 installed), Terraform input is pre-exported fixture JSON, and CI pins dummy
 AWS environment variables to prove nothing needs real credentials.
->>>>>>> 3076493 (First Draft: test running successfully)
