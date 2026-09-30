@@ -47,6 +47,11 @@ htmlcov/
 *.tfstate.*
 crash.log
 
+# Local scratch folders and downloaded provider binaries (never commit these)
+ManualTests/complex/
+Atest/
+mystate.json
+
 # Logs and temporary files
 *.log
 *.tmp

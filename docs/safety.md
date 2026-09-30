@@ -55,6 +55,18 @@ true, and any change that weakens it is out of scope by definition.
   the database without running migrations; a missing database file is an
   error (exit 5, "run reality scan first"), never silently created. A test
   asserts every table count is unchanged after a simulation.
+- **`reconcile` writes locally, and only locally.** It is the one command
+  besides `scan` that opens the database for writing: it stores its findings
+  and runs schema migrations on an existing database. That is arithmetic over
+  rows already in the file — it contacts no API, and the set of operations it
+  can invoke is unchanged. A missing database is still an error, because
+  reconciling nothing would be a vacuous success.
+- **Optional dependencies are imported lazily, never at module scope.**
+  `boto3` is confined to the AWS adapters and `rich` to the `--output table`
+  renderers. Importing either at module scope would put it in the chain of
+  *every* command, so a plain install without the extra could not run `why` at
+  all. A test simulates a missing `rich` and asserts the CLI still works and
+  that `table` fails with an actionable message, not a traceback.
 
 ## Data retention and secrets
 

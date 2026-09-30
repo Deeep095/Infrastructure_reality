@@ -555,7 +555,9 @@ class TestImpactCommand:
         assert out.startswith(f"reality: impact of {WEB_SG}")
         assert "risk: high" in out
         assert f"- {WEB} (depth 1, undocumented)" in out
-        assert f"path: {WEB_SG} -> {WEB}" in out
+        # The path is printed in the direction the edges point: the instance
+        # is attached_to the security group, so the dependent leads.
+        assert f"path: {WEB} -> {WEB_SG}" in out
 
     def test_json_output_is_parseable_and_stable(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]

@@ -49,12 +49,14 @@ END = datetime(2026, 3, 2, 0, 0, tzinfo=UTC)
 # deliberately distinct — joining the two worlds is reconciliation's job, not
 # the scan's.
 TF_WEB = "terraform/aws/aws_instance/-/-/aws_instance.web"
+TF_BATCH = "terraform/aws/aws_instance/-/-/aws_instance.batch"
 TF_WEB_SG = "terraform/aws/aws_security_group/-/-/aws_security_group.web_sg"
 TF_DB_SG = "terraform/aws/aws_security_group/-/-/module.network.aws_security_group.db_sg"
 TF_PROCESSOR = "terraform/aws/aws_lambda_function/-/-/aws_lambda_function.processor"
 TF_PROCESSOR_ROLE = "terraform/aws/aws_iam_role/-/-/aws_iam_role.processor_role"
 TF_PRIMARY = "terraform/aws/aws_db_instance/-/-/aws_db_instance.primary"
 WEB = "aws/ec2/instance/eu-west-1/123456789012/i-0web"
+BATCH = "aws/ec2/instance/eu-west-1/123456789012/i-0batch"
 WEB_SG = "aws/ec2/security-group/eu-west-1/123456789012/sg-0aaa111"
 DB_SG = "aws/ec2/security-group/eu-west-1/123456789012/sg-0bbb222"
 RDS_PRIMARY = "aws/rds/db/eu-west-1/123456789012/primary"
@@ -72,6 +74,8 @@ DATA_LAKE_REFERENCED = "aws/s3/bucket/-/-/data-lake"
 #: the CDN (no ARN in state, nothing observed), and the batch instance
 #: (i-0batch789 is not i-0batch) all stay unmapped.
 EXPECTED_MAPPINGS = {
+    TF_WEB: WEB,
+    TF_BATCH: BATCH,
     TF_WEB_SG: WEB_SG,
     TF_DB_SG: DB_SG,
     TF_PROCESSOR: PROCESSOR,
@@ -319,7 +323,10 @@ def test_full_scan_persists_all_sources_in_one_run(store: ScanStore) -> None:
     mappings = store.identity_mappings.for_scan_run(1)
     assert {m.terraform_canonical_id: m.aws_canonical_id for m in mappings} == EXPECTED_MAPPINGS
     for mapping in mappings:
-        assert mapping.basis.value == "arn"
+        # Most joins are ARN-based. aws_instance.batch carries no ARN in the
+        # state, so it joins on its native ID instead - the same exact-identifier
+        # rule, a different field.
+        assert mapping.basis.value in ("arn", "native_id")
         evidence = store.evidence.get(mapping.evidence_id)
         assert evidence is not None, mapping.evidence_id
         assert evidence.type.value == "identity_match"

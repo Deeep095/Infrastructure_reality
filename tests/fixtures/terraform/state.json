@@ -22,8 +22,8 @@
           "type": "aws_instance",
           "name": "web",
           "values": {
-            "id": "i-0abc123def456",
-            "arn": "arn:aws:ec2:eu-west-1:123456789012:instance/i-0abc123def456",
+            "id": "i-0web",
+            "arn": "arn:aws:ec2:eu-west-1:123456789012:instance/i-0web",
             "instance_type": "t3.micro",
             "vpc_security_group_ids": ["sg-0aaa111"],
             "iam_instance_profile": "arn:aws:iam::123456789012:instance-profile/web-profile"
@@ -31,12 +31,12 @@
           "depends_on": ["aws_security_group.web_sg"]
         },
         {
-          "address": "aws_instance.batch",
-          "mode": "managed",
-          "type": "aws_instance",
-          "name": "batch",
-          "values": {
-            "id": "i-0batch789",
+            "address": "aws_instance.batch",
+            "mode": "managed",
+            "type": "aws_instance",
+            "name": "batch",
+            "values": {
+            "id": "i-0batch",
             "instance_type": "t3.small",
             "vpc_security_group_ids": ["sg-0undeclared"]
           }

@@ -274,11 +274,12 @@ def test_runtime_observed_legacy_dependency_stays_undocumented(store: ScanStore)
         in next(item for item in report.findings if item.finding_id == legacy).explanation
     )
 
-    # And the unmapped web instance itself: its declared counterpart names a
-    # different instance ID (i-0abc123def456, not i-0web), so its observed
-    # attachment is UNDOCUMENTED too — nothing joined them.
+    # And the same instance's attachment to the *declared* security group: the
+    # state's ARN names i-0web and AWS reports i-0web, so the declared and
+    # observed identities join and this attachment is CONFIRMED - the join that
+    # the placeholder instance ID used to make impossible.
     assert conclusions[finding_id(WEB, WEB_SG, RelationshipType.ATTACHED_TO)] is (
-        Conclusion.UNDOCUMENTED
+        Conclusion.CONFIRMED
     )
 
 

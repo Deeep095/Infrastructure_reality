@@ -24,7 +24,7 @@ import pytest
 
 from reality import cli
 from reality.adapters.aws_resources import AwsResourcesAdapter
-from reality.domain.enums import ChangeAction, Conclusion, EvidenceSource, ResourceType
+from reality.domain.enums import ChangeAction, EvidenceSource, ResourceType
 from reality.domain.models import Resource, TerraformChange
 from reality.services.impact import DependentKind, RiskLevel, SimulateService
 from reality.services.reconcile import ReconcileService
@@ -45,10 +45,14 @@ REGION = "eu-west-1"
 # namespace, observed ones in the aws namespace, and only the stored address
 # mapping may join the two worlds.
 TF_WEB = "terraform/aws/aws_instance/-/-/aws_instance.web"
+TF_BATCH = "terraform/aws/aws_instance/-/-/aws_instance.batch"
 TF_WEB_SG = "terraform/aws/aws_security_group/-/-/aws_security_group.web_sg"
+TF_DB_SG = "terraform/aws/aws_security_group/-/-/module.network.aws_security_group.db_sg"
 TF_PRIMARY = "terraform/aws/aws_db_instance/-/-/aws_db_instance.primary"
 WEB = "aws/ec2/instance/eu-west-1/123456789012/i-0web"
+BATCH = "aws/ec2/instance/eu-west-1/123456789012/i-0batch"
 WEB_SG = "aws/ec2/security-group/eu-west-1/123456789012/sg-0aaa111"
+DB_SG = "aws/ec2/security-group/eu-west-1/123456789012/sg-0bbb222"
 RDS_PRIMARY = "aws/rds/db/eu-west-1/123456789012/primary"
 
 # Only the AWS resources adapter is scanned here; IAM and CloudTrail stay
@@ -171,13 +175,21 @@ def change(address: str, tf_type: str, *actions: str) -> dict[str, Any]:
 
 
 def map_address_to_observed(store: ScanStore) -> None:
-    """Record the one legitimate cross-namespace identity: address -> resource."""
+    """Record the legitimate cross-namespace identities: address -> resource."""
     store.terraform_addresses.upsert(
         TerraformChange(
             address="aws_security_group.web_sg",
             tf_resource_type="aws_security_group",
             actions=(ChangeAction.DELETE,),
             canonical_id=WEB_SG,
+        )
+    )
+    store.terraform_addresses.upsert(
+        TerraformChange(
+            address="module.network.aws_security_group.db_sg",
+            tf_resource_type="aws_security_group",
+            actions=(ChangeAction.DELETE,),
+            canonical_id=DB_SG,
         )
     )
 
@@ -228,28 +240,25 @@ def test_undocumented_dependent_makes_the_target_high(scanned: ScanStore, tmp_pa
     # address mapping is one of the two places a cross-world identity may
     # live (identity mappings are the other).
     map_address_to_observed(scanned)
-    plan = write_plan(tmp_path, change("aws_security_group.web_sg", "aws_security_group", "delete"))
+    plan = write_plan(
+        tmp_path, change("module.network.aws_security_group.db_sg", "aws_security_group", "delete")
+    )
     report = SimulateService(scanned).run(plan)
 
     (target,) = report.targets
     assert target.resolved
-    assert target.canonical_id == WEB_SG
+    assert target.canonical_id == DB_SG
     assert target.risk is RiskLevel.HIGH
     kinds = {dependent.canonical_id: dependent.kind for dependent in target.dependents}
-    # The EC2 instance's attachment is observed but undeclared — the declared
-    # web instance (i-0abc123def456) is a different resource from the observed
-    # one (i-0web), so nothing joins them. The RDS attachment, by contrast, is
-    # now CONFIRMED: its declaration joined the observed database through the
-    # scan's identity mapping, making it DOCUMENTED.
-    assert kinds == {WEB: DependentKind.UNDOCUMENTED, RDS_PRIMARY: DependentKind.DOCUMENTED}
-    web = next(dependent for dependent in target.dependents if dependent.canonical_id == WEB)
-    assert web.path == (WEB_SG, WEB)
-    assert web.provenance == ("aws_observed",)
-    assert web.evidence_ids
-    rds = next(
-        dependent for dependent in target.dependents if dependent.canonical_id == RDS_PRIMARY
-    )
-    assert rds.conclusion is Conclusion.CONFIRMED
+    # The batch instance's attachment is observed but undeclared: the declared
+    # aws_instance.batch names sg-0undeclared, which resolves to nothing, so the
+    # observed attachment to sg-0bbb222 has no declaration to join. One
+    # undocumented dependent is enough for HIGH.
+    assert kinds == {BATCH: DependentKind.UNDOCUMENTED}
+    batch = next(dependent for dependent in target.dependents if dependent.canonical_id == BATCH)
+    assert batch.path == (DB_SG, BATCH)
+    assert batch.provenance == ("aws_observed",)
+    assert batch.evidence_ids
     assert report.risk is RiskLevel.HIGH  # the one undocumented dependent is enough
 
 
@@ -319,7 +328,9 @@ def test_report_json_is_stable_across_runs(scanned: ScanStore, tmp_path: Path) -
     parsed = json.loads(stable_json(first))
     assert set(parsed) == {"plan_path", "depth", "risk", "targets", "notes"}
     web_sg = next(target for target in parsed["targets"] if target["resolved"])
-    assert web_sg["risk"] == "high"
+    # Both of this group's dependents are now CONFIRMED, so the band is MEDIUM:
+    # known dependents, nothing undocumented. HIGH needs an undocumented one.
+    assert web_sg["risk"] == "medium"
     assert web_sg["dependents"]
     for dependent in web_sg["dependents"]:
         assert set(dependent) == {
@@ -349,12 +360,21 @@ def test_no_terraform_or_aws_call_is_made(
         return real_import(name, *args, **kwargs)
 
     monkeypatch.setattr(builtins, "__import__", guarded)
+    # Snapshot before: boto3 may legitimately already be in sys.modules because
+    # an earlier test in this session imported it (the AWS adapter tests do,
+    # whenever boto3 is installed). What matters is that *simulate* adds
+    # nothing, so the assertion is on the delta, not on the global state.
+    before = set(sys.modules)
     plan = write_plan(tmp_path, change("aws_instance.web", "aws_instance", "delete"))
     report = SimulateService(scanned).run(plan)
 
     assert report.targets[0].resolved  # the run completed
-    assert "boto3" not in sys.modules
-    assert "botocore" not in sys.modules
+    new_aws_modules = {
+        name for name in set(sys.modules) - before if name.startswith(("boto3", "botocore"))
+    }
+    assert new_aws_modules == set(), f"simulate newly imported {new_aws_modules}"
+    # The guarded __import__ above is the real guarantee: if simulate had tried
+    # to construct a client it would have raised before reaching here.
 
 
 def test_simulate_writes_nothing_to_the_database(scanned: ScanStore, tmp_path: Path) -> None:
@@ -412,7 +432,7 @@ def test_cli_simulate_json_is_parseable(
     )
     assert exit_code == cli.EXIT_OK
     parsed = json.loads(capsys.readouterr().out)
-    assert parsed["risk"] == "high"
+    assert parsed["risk"] == "medium"
     (target,) = parsed["targets"]
     assert target["canonical_id"] == WEB_SG
     assert {dependent["canonical_id"] for dependent in target["dependents"]} == {WEB, RDS_PRIMARY}

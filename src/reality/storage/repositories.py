@@ -203,6 +203,20 @@ class ResourceRepository:
     def count(self) -> int:
         return int(self._conn.execute("SELECT COUNT(*) FROM resources").fetchone()[0])
 
+    def all_canonical_ids(self) -> list[str]:
+        """Return all canonical IDs in the database."""
+        rows = self._conn.execute("SELECT canonical_id FROM resources").fetchall()
+        return [row["canonical_id"] for row in rows]
+
+    def all(self) -> list[Resource]:
+        """Every stored resource, hydrated, in canonical-ID order.
+
+        Callers that match a user-supplied identifier against the
+        source-native fields need the whole row, not just the key.
+        """
+        rows = self._conn.execute("SELECT * FROM resources ORDER BY canonical_id").fetchall()
+        return [self._hydrate(row) for row in rows]
+
     @staticmethod
     def _hydrate(row: sqlite3.Row) -> Resource:
         return Resource(

@@ -79,6 +79,22 @@ Rules (`reality.domain.ids`):
 - The source-native identifier (native ID, ARN, Terraform address) is always
   preserved alongside the canonical key; parsing never destroys the original.
 
+**Referring to a resource on the command line.** `why`, `impact`, and
+`simulate` take whatever a human has to hand, and resolve it in
+`reality.cli` through the stored resources, in this order:
+
+1. An exact canonical ID, passed through unchanged.
+2. An exact `terraform_address`, ARN, or `native_id` column value.
+3. The short display form (`aws:iam/role:123456789012:cleanup_role`).
+4. The same three native values, compared case-insensitively.
+
+If a step matches more than one stored resource the CLI refuses (exit 5) and
+names every candidate. It does **not** fall through to a later step, because a
+query that is genuinely ambiguous must not be resolved by luck, and it never
+matches on display name or tag. A resource that exists only as a relationship
+endpoint — an undeclared security group, say — is therefore not a valid
+argument; query the resource that depends on it.
+
 ## Storage and data retention
 
 One SQLite file (default `reality.db`), one transaction per scan. Tables:
@@ -129,6 +145,17 @@ canonical (source, target, type) triples only** — no fuzzy matching, no
 name-based resolution. Candidates and their evidence are never modified;
 conclusions are written as separate `findings` rows (stable IDs
 `reconcile:{type}:{source}:{target}`).
+
+Run it with `reality reconcile [--scan-run N] [--output FORMAT]`. It is the only
+command besides `scan` that writes: it opens the database for writing, runs
+migrations on an existing file, and replaces the findings for the analysed run.
+A *missing* database is still an error (exit 5) — reconciling an empty file
+would report "nothing is undocumented", which is the one conclusion this tool
+must never be able to produce. Rendering is separated from the service
+(`reality.services.reports`) and supports `text`, `table`, `json`, `yaml`, and
+`csv`; the JSON form is byte-stable for CI diffing, except that `scan_run_id`
+advances on every pass because each pass is itself a recorded scan run. The
+`findings` and `counts` payloads are invariant across passes.
 
 **The snapshot boundary.** A pass analyses exactly one scan run — the latest
 non-reconciliation run, or an explicit one. Only relationships with evidence
@@ -208,6 +235,19 @@ highest target risk.
 
 Both commands accept `--json`: byte-stable output (sorted keys, no
 timestamps), so identical inputs produce identical bytes.
+
+**The CI gate.** `--fail-on {never,medium,high}` (default `never`) compares the
+report's risk band against a threshold and returns exit `6` when it is met or
+exceeded; `simulate` thresholds on its overall risk. The report itself is
+printed identically either way, and the band is never recomputed for the gate —
+the gate reads the same number the human reads. The default is `never` so that
+adding the flag to an existing command cannot change its exit status; only a
+caller who names a threshold opts into gating.
+
+Exit codes: `0` success · `2` usage error · `3` registered but not implemented ·
+`4` configuration rejected by the safety contract · `5` invalid local input
+(refused scan/simulation, unknown or ambiguous resource, unseen plan) · `6` the
+`--fail-on` threshold was met.
 
 ## Limitations of the AWS-side sources
 

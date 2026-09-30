@@ -15,10 +15,17 @@ dependencies = [
 aws = [
     "boto3>=1.34",
 ]
+# Only '--output table' needs rich. It is imported lazily, so text, json, yaml
+# and csv output work without it, and the dev extra pulls it in so the table
+# renderer is covered by the test suite.
+table = [
+    "rich>=13",
+]
 dev = [
     "pytest>=8",
     "ruff>=0.6",
     "mypy>=1.11",
+    "rich>=13",
 ]
 
 [project.scripts]
@@ -42,3 +49,11 @@ select = ["E", "F", "I", "UP", "B", "SIM"]
 python_version = "3.12"
 strict = true
 files = ["src/reality"]
+
+# boto3 and rich are both optional extras, imported lazily. Neither ships type
+# information, and their absence is not a type error - it is a supported
+# configuration. Without this the reported error count changes depending on
+# which extras happen to be installed, which makes the gate meaningless.
+[[tool.mypy.overrides]]
+module = ["boto3", "boto3.*", "rich", "rich.*"]
+ignore_missing_imports = true

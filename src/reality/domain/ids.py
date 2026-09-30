@@ -123,6 +123,30 @@ class CanonicalId(BaseModel):
     def is_global(self) -> bool:
         return self.provider != UNRESOLVED_PROVIDER and self.service in GLOBAL_SERVICES
 
+    def short_id(self) -> str:
+        """Return a concise human-readable identifier preserving key context.
+
+        Format: provider:service/resource_type.name (e.g., terraform:aws/instance.web)
+        """
+        if self.provider == TERRAFORM_PROVIDER:
+            # For Terraform: extract the name from the full address
+            # resource_id is the full address like "module.vpc.aws_instance.web[0]"
+            name = self.resource_id.split(".")[-1]
+            if "[" in name:
+                name = name[: name.index("[")]
+            return f"{self.provider}:{self.service}/{self.resource_type}.{name}"
+        elif self.provider == UNRESOLVED_PROVIDER:
+            return f"unresolved:{self.resource_id}"
+        else:
+            # For AWS: include region/account context if available
+            context = ""
+            if self.region:
+                context += f":{self.region}"
+            if self.account:
+                context += f":{self.account}"
+            base = f"{self.provider}:{self.service}/{self.resource_type}"
+            return f"{base}{context}:{self.resource_id}"
+
 
 def parse_arn(arn: str) -> CanonicalId:
     """Parse a concrete AWS ARN into a canonical ID.

@@ -83,8 +83,8 @@ def test_state_records_unsupported_types_as_terraform_resource(adapter) -> None:
 def test_state_preserves_native_id_and_arn(adapter) -> None:
     result = adapter.parse_document(load_fixture("state.json"))
     web = resource_by_address(result, "aws_instance.web")
-    assert web.native_id == "i-0abc123def456"
-    assert web.arn == "arn:aws:ec2:eu-west-1:123456789012:instance/i-0abc123def456"
+    assert web.native_id == "i-0web"
+    assert web.arn == "arn:aws:ec2:eu-west-1:123456789012:instance/i-0web"
     assert web.terraform_address == "aws_instance.web"
 
 

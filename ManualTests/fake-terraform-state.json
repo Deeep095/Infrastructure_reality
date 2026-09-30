@@ -1,178 +1,668 @@
 {
-    "format_version": "1.0",
-    "terraform_version": "1.9.5",
-    "values": {
-        "root_module": {
-            "resources": [
-                {
-                    "address": "aws_vpc.main",
-                    "mode": "managed",
-                    "type": "aws_vpc",
-                    "name": "main",
-                    "values": {
-                        "id": "vpc-01010101",
-                        "arn": "arn:aws:ec2:eu-west-1:123456789012:vpc/vpc-01010101",
-                        "cidr_block": "10.0.0.0/16"
-                    }
-                },
-                {
-                    "address": "aws_security_group.web_sg",
-                    "mode": "managed",
-                    "type": "aws_security_group",
-                    "name": "web_sg",
-                    "values": {
-                        "id": "sg-web0001",
-                        "arn": "arn:aws:ec2:eu-west-1:123456789012:security-group/sg-web0001",
-                        "name": "manual-web-sg",
-                        "description": "Public web tier"
-                    }
-                },
-                {
-                    "address": "aws_security_group.db_sg",
-                    "mode": "managed",
-                    "type": "aws_security_group",
-                    "name": "db_sg",
-                    "values": {
-                        "id": "sg-db0002",
-                        "arn": "arn:aws:ec2:eu-west-1:123456789012:security-group/sg-db0002",
-                        "name": "manual-db-sg",
-                        "description": "Database tier"
-                    }
-                },
-                {
-                    "address": "aws_instance.web",
-                    "mode": "managed",
-                    "type": "aws_instance",
-                    "name": "web",
-                    "values": {
-                        "id": "i-web0001",
-                        "arn": "arn:aws:ec2:eu-west-1:123456789012:instance/i-web0001",
-                        "instance_type": "t3.small",
-                        "vpc_security_group_ids": [
-                            "sg-web0001"
-                        ]
-                    },
-                    "depends_on": [
-                        "aws_security_group.web_sg"
-                    ]
-                },
-                {
-                    "address": "aws_instance.worker",
-                    "mode": "managed",
-                    "type": "aws_instance",
-                    "name": "worker",
-                    "values": {
-                        "id": "i-worker0002",
-                        "arn": "arn:aws:ec2:eu-west-1:123456789012:instance/i-worker0002",
-                        "instance_type": "t3.medium",
-                        "vpc_security_group_ids": [
-                            "sg-web0001"
-                        ]
-                    },
-                    "depends_on": [
-                        "aws_security_group.web_sg",
-                        "aws_instance.web"
-                    ]
-                },
-                {
-                    "address": "aws_iam_role.processor_role",
-                    "mode": "managed",
-                    "type": "aws_iam_role",
-                    "name": "processor_role",
-                    "values": {
-                        "id": "manual-processor-role",
-                        "arn": "arn:aws:iam::123456789012:role/manual-processor-role",
-                        "name": "manual-processor-role"
-                    }
-                },
-                {
-                    "address": "aws_lambda_function.processor",
-                    "mode": "managed",
-                    "type": "aws_lambda_function",
-                    "name": "processor",
-                    "values": {
-                        "id": "manual-processor",
-                        "arn": "arn:aws:lambda:eu-west-1:123456789012:function:manual-processor",
-                        "role": "arn:aws:iam::123456789012:role/manual-processor-role"
-                    },
-                    "depends_on": [
-                        "aws_iam_role.processor_role",
-                        "module.network.aws_security_group.internal_sg"
-                    ]
-                },
-                {
-                    "address": "aws_db_instance.primary",
-                    "mode": "managed",
-                    "type": "aws_db_instance",
-                    "name": "primary",
-                    "values": {
-                        "id": "manual-primary",
-                        "arn": "arn:aws:rds:eu-west-1:123456789012:db:manual-primary",
-                        "engine": "postgres",
-                        "vpc_security_group_ids": [
-                            "sg-db0002"
-                        ]
-                    },
-                    "depends_on": [
-                        "aws_security_group.db_sg"
-                    ]
-                },
-                {
-                    "address": "aws_s3_bucket.data",
-                    "mode": "managed",
-                    "type": "aws_s3_bucket",
-                    "name": "data",
-                    "values": {
-                        "id": "manual-infrastructure-data",
-                        "arn": "arn:aws:s3:::manual-infrastructure-data"
-                    }
-                },
-                {
-                    "address": "aws_cloudfront_distribution.cdn",
-                    "mode": "managed",
-                    "type": "aws_cloudfront_distribution",
-                    "name": "cdn",
-                    "values": {
-                        "id": "E1MANUAL123456"
-                    }
+    "terraform": {
+        "required_version": ">= 1.5.0",
+        "required_providers": {
+            "aws": {
+                "source": "hashicorp/aws",
+                "version": "~> 5.0"
+            }
+        }
+    },
+    "provider": {
+        "aws": {
+            "region": "${var.aws_region}",
+            "access_key": "${var.dummy_access_key}",
+            "secret_key": "${var.dummy_secret_key}"
+        }
+    },
+    "variable": {
+        "aws_region": {
+            "type": "string",
+            "default": "us-east-1"
+        },
+        "dummy_access_key": {
+            "type": "string",
+            "default": "AKIAIOSFODNN7EXAMPLE"
+        },
+        "dummy_secret_key": {
+            "type": "string",
+            "default": "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
+        },
+        "db_password": {
+            "type": "string",
+            "default": "SuperSecurePassword123!"
+        }
+    },
+    "resource": {
+        "aws_vpc": {
+            "prod": {
+                "cidr_block": "10.0.0.0/16",
+                "enable_dns_support": true,
+                "enable_dns_hostnames": true,
+                "tags": {
+                    "Name": "prod-vpc",
+                    "Environment": "Production"
                 }
-            ],
-            "child_modules": [
-                {
-                    "address": "module.network",
-                    "resources": [
-                        {
-                            "address": "module.network.aws_security_group.internal_sg",
-                            "mode": "managed",
-                            "type": "aws_security_group",
-                            "name": "internal_sg",
-                            "values": {
-                                "id": "sg-internal0003",
-                                "arn": "arn:aws:ec2:eu-west-1:123456789012:security-group/sg-internal0003",
-                                "name": "manual-internal-sg",
-                                "description": "Internal services"
+            }
+        },
+        "aws_internet_gateway": {
+            "igw": {
+                "vpc_id": "${aws_vpc.prod.id}",
+                "tags": {
+                    "Name": "prod-igw"
+                }
+            }
+        },
+        "aws_subnet": {
+            "public_az1": {
+                "vpc_id": "${aws_vpc.prod.id}",
+                "cidr_block": "10.0.1.0/24",
+                "availability_zone": "${var.aws_region}a",
+                "map_public_ip_on_launch": true,
+                "tags": {
+                    "Name": "prod-public-az1"
+                }
+            },
+            "public_az2": {
+                "vpc_id": "${aws_vpc.prod.id}",
+                "cidr_block": "10.0.2.0/24",
+                "availability_zone": "${var.aws_region}b",
+                "map_public_ip_on_launch": true,
+                "tags": {
+                    "Name": "prod-public-az2"
+                }
+            },
+            "app_az1": {
+                "vpc_id": "${aws_vpc.prod.id}",
+                "cidr_block": "10.0.11.0/24",
+                "availability_zone": "${var.aws_region}a",
+                "tags": {
+                    "Name": "prod-app-az1"
+                }
+            },
+            "app_az2": {
+                "vpc_id": "${aws_vpc.prod.id}",
+                "cidr_block": "10.0.12.0/24",
+                "availability_zone": "${var.aws_region}b",
+                "tags": {
+                    "Name": "prod-app-az2"
+                }
+            },
+            "data_az1": {
+                "vpc_id": "${aws_vpc.prod.id}",
+                "cidr_block": "10.0.21.0/24",
+                "availability_zone": "${var.aws_region}a",
+                "tags": {
+                    "Name": "prod-data-az1"
+                }
+            },
+            "data_az2": {
+                "vpc_id": "${aws_vpc.prod.id}",
+                "cidr_block": "10.0.22.0/24",
+                "availability_zone": "${var.aws_region}b",
+                "tags": {
+                    "Name": "prod-data-az2"
+                }
+            }
+        },
+        "aws_eip": {
+            "nat_az1": {
+                "domain": "vpc",
+                "tags": {
+                    "Name": "prod-eip-az1"
+                }
+            },
+            "nat_az2": {
+                "domain": "vpc",
+                "tags": {
+                    "Name": "prod-eip-az2"
+                }
+            }
+        },
+        "aws_nat_gateway": {
+            "nat_az1": {
+                "allocation_id": "${aws_eip.nat_az1.id}",
+                "subnet_id": "${aws_subnet.public_az1.id}",
+                "tags": {
+                    "Name": "prod-nat-az1"
+                }
+            },
+            "nat_az2": {
+                "allocation_id": "${aws_eip.nat_az2.id}",
+                "subnet_id": "${aws_subnet.public_az2.id}",
+                "tags": {
+                    "Name": "prod-nat-az2"
+                }
+            }
+        },
+        "aws_route_table": {
+            "public": {
+                "vpc_id": "${aws_vpc.prod.id}",
+                "tags": {
+                    "Name": "prod-public-rt"
+                }
+            },
+            "private_az1": {
+                "vpc_id": "${aws_vpc.prod.id}",
+                "tags": {
+                    "Name": "prod-private-rt-az1"
+                }
+            },
+            "private_az2": {
+                "vpc_id": "${aws_vpc.prod.id}",
+                "tags": {
+                    "Name": "prod-private-rt-az2"
+                }
+            }
+        },
+        "aws_route": {
+            "public_internet": {
+                "route_table_id": "${aws_route_table.public.id}",
+                "destination_cidr_block": "0.0.0.0/0",
+                "gateway_id": "${aws_internet_gateway.igw.id}"
+            },
+            "private_nat_az1": {
+                "route_table_id": "${aws_route_table.private_az1.id}",
+                "destination_cidr_block": "0.0.0.0/0",
+                "nat_gateway_id": "${aws_nat_gateway.nat_az1.id}"
+            },
+            "private_nat_az2": {
+                "route_table_id": "${aws_route_table.private_az2.id}",
+                "destination_cidr_block": "0.0.0.0/0",
+                "nat_gateway_id": "${aws_nat_gateway.nat_az2.id}"
+            }
+        },
+        "aws_route_table_association": {
+            "pub_az1": {
+                "subnet_id": "${aws_subnet.public_az1.id}",
+                "route_table_id": "${aws_route_table.public.id}"
+            },
+            "pub_az2": {
+                "subnet_id": "${aws_subnet.public_az2.id}",
+                "route_table_id": "${aws_route_table.public.id}"
+            },
+            "app_az1": {
+                "subnet_id": "${aws_subnet.app_az1.id}",
+                "route_table_id": "${aws_route_table.private_az1.id}"
+            },
+            "app_az2": {
+                "subnet_id": "${aws_subnet.app_az2.id}",
+                "route_table_id": "${aws_route_table.private_az2.id}"
+            },
+            "data_az1": {
+                "subnet_id": "${aws_subnet.data_az1.id}",
+                "route_table_id": "${aws_route_table.private_az1.id}"
+            },
+            "data_az2": {
+                "subnet_id": "${aws_subnet.data_az2.id}",
+                "route_table_id": "${aws_route_table.private_az2.id}"
+            }
+        },
+        "aws_kms_key": {
+            "master_key": {
+                "description": "Production Enterprise Master KMS Key",
+                "deletion_window_in_days": 7,
+                "enable_key_rotation": true,
+                "tags": {
+                    "Name": "prod-kms-key"
+                }
+            }
+        },
+        "aws_iam_role": {
+            "ec2_role": {
+                "name": "prod-ec2-application-role",
+                "assume_role_policy": "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Action\":\"sts:AssumeRole\",\"Effect\":\"Allow\",\"Principal\":{\"Service\":\"://amazonaws.com\"}}]}"
+            }
+        },
+        "aws_iam_policy": {
+            "app_policy": {
+                "name": "prod-app-permissions",
+                "description": "Allows access to app S3 assets and queue loops",
+                "policy": "{\"Version\":\"2012-10-17\",\"Statement\":[{\"Effect\":\"Allow\",\"Action\":[\"s3:GetObject\",\"s3:PutObject\"],\"Resource\":[\"${aws_s3_bucket.assets.arn}/*\"]},{\"Effect\":\"Allow\",\"Action\":[\"sqs:ReceiveMessage\",\"sqs:DeleteMessage\",\"sqs:SendMessage\"],\"Resource\":[\"${aws_sqs_queue.jobs.arn}\"]}]}"
+            }
+        },
+        "aws_iam_role_policy_attachment": {
+            "attach_app": {
+                "role": "${aws_iam_role.ec2_role.name}",
+                "policy_arn": "${aws_iam_policy.app_policy.arn}"
+            }
+        },
+        "aws_iam_instance_profile": {
+            "ec2_profile": {
+                "name": "prod-ec2-instance-profile",
+                "role": "${aws_iam_role.ec2_role.name}"
+            }
+        },
+        "aws_s3_bucket": {
+            "assets": {
+                "bucket": "prod-enterprise-static-assets-dummy-12345",
+                "force_destroy": true
+            }
+        },
+        "aws_s3_bucket_server_side_encryption_configuration": {
+            "assets_encrypt": {
+                "bucket": "${aws_s3_bucket.assets.id}",
+                "rule": [
+                    {
+                        "apply_server_side_encryption_by_default": [
+                            {
+                                "kms_master_key_id": "${aws_kms_key.master_key.arn}",
+                                "sse_algorithm": "aws:kms"
                             }
-                        },
-                        {
-                            "address": "module.network.aws_instance.internal",
-                            "mode": "managed",
-                            "type": "aws_instance",
-                            "name": "internal",
-                            "values": {
-                                "id": "i-internal0004",
-                                "arn": "arn:aws:ec2:eu-west-1:123456789012:instance/i-internal0004",
-                                "instance_type": "t3.micro",
-                                "vpc_security_group_ids": [
-                                    "sg-internal0003"
+                        ]
+                    }
+                ]
+            }
+        },
+        "aws_cloudfront_origin_access_control": {
+            "oac": {
+                "name": "s3-assets-oac",
+                "description": "OAC for secure S3 static assets access",
+                "origin_access_control_origin_type": "s3",
+                "signing_behavior": "always",
+                "signing_protocol": "sigv4"
+            }
+        },
+        "aws_cloudfront_distribution": {
+            "cdn": {
+                "enabled": true,
+                "is_ipv6_enabled": true,
+                "comment": "Production Application Global Content Delivery Network",
+                "default_root_object": "index.html",
+                "origin": [
+                    {
+                        "domain_name": "${aws_s3_bucket.assets.bucket_regional_domain_name}",
+                        "origin_id": "S3Origin",
+                        "origin_access_control_id": "${aws_cloudfront_origin_access_control.oac.id}"
+                    }
+                ],
+                "default_cache_behavior": [
+                    {
+                        "allowed_methods": [
+                            "GET",
+                            "HEAD"
+                        ],
+                        "cached_methods": [
+                            "GET",
+                            "HEAD"
+                        ],
+                        "target_origin_id": "S3Origin",
+                        "forwarded_values": [
+                            {
+                                "query_string": false,
+                                "cookies": [
+                                    {
+                                        "forward": "none"
+                                    }
                                 ]
-                            },
-                            "depends_on": [
-                                "module.network.aws_security_group.internal_sg"
-                            ]
-                        }
-                    ]
+                            }
+                        ],
+                        "viewer_protocol_policy": "redirect-to-https",
+                        "min_ttl": 0,
+                        "default_ttl": 3600,
+                        "max_ttl": 86400
+                    }
+                ],
+                "restrictions": [
+                    {
+                        "geo_restriction": [
+                            {
+                                "restriction_type": "none"
+                            }
+                        ]
+                    }
+                ],
+                "viewer_certificate": [
+                    {
+                        "cloudfront_default_certificate": true
+                    }
+                ]
+            }
+        },
+        "aws_security_group": {
+            "lb": {
+                "name": "prod-lb-sg",
+                "description": "Allows incoming public web browser traffic",
+                "vpc_id": "${aws_vpc.prod.id}",
+                "ingress": [
+                    {
+                        "from_port": 80,
+                        "to_port": 80,
+                        "protocol": "tcp",
+                        "cidr_blocks": [
+                            "0.0.0.0/0"
+                        ],
+                        "description": "",
+                        "ipv6_cidr_blocks": [],
+                        "prefix_list_ids": [],
+                        "security_groups": [],
+                        "self": false
+                    },
+                    {
+                        "from_port": 443,
+                        "to_port": 443,
+                        "protocol": "tcp",
+                        "cidr_blocks": [
+                            "0.0.0.0/0"
+                        ],
+                        "description": "",
+                        "ipv6_cidr_blocks": [],
+                        "prefix_list_ids": [],
+                        "security_groups": [],
+                        "self": false
+                    }
+                ],
+                "egress": [
+                    {
+                        "from_port": 0,
+                        "to_port": 0,
+                        "protocol": "-1",
+                        "cidr_blocks": [
+                            "0.0.0.0/0"
+                        ],
+                        "description": "",
+                        "ipv6_cidr_blocks": [],
+                        "prefix_list_ids": [],
+                        "security_groups": [],
+                        "self": false
+                    }
+                ]
+            },
+            "app": {
+                "name": "prod-app-sg",
+                "description": "Isolates application to Load Balancer traffic only",
+                "vpc_id": "${aws_vpc.prod.id}",
+                "ingress": [
+                    {
+                        "from_port": 8080,
+                        "to_port": 8080,
+                        "protocol": "tcp",
+                        "security_groups": [
+                            "${aws_security_group.lb.id}"
+                        ],
+                        "cidr_blocks": [],
+                        "description": "",
+                        "ipv6_cidr_blocks": [],
+                        "prefix_list_ids": [],
+                        "self": false
+                    }
+                ],
+                "egress": [
+                    {
+                        "from_port": 0,
+                        "to_port": 0,
+                        "protocol": "-1",
+                        "cidr_blocks": [
+                            "0.0.0.0/0"
+                        ],
+                        "description": "",
+                        "ipv6_cidr_blocks": [],
+                        "prefix_list_ids": [],
+                        "self": false
+                    }
+                ]
+            },
+            "database": {
+                "name": "prod-db-sg",
+                "description": "Strict firewall policy for backend relational database",
+                "vpc_id": "${aws_vpc.prod.id}",
+                "ingress": [
+                    {
+                        "from_port": 5432,
+                        "to_port": 5432,
+                        "protocol": "tcp",
+                        "security_groups": [
+                            "${aws_security_group.app.id}"
+                        ],
+                        "cidr_blocks": [],
+                        "description": "",
+                        "ipv6_cidr_blocks": [],
+                        "prefix_list_ids": [],
+                        "self": false
+                    }
+                ],
+                "egress": [
+                    {
+                        "from_port": 0,
+                        "to_port": 0,
+                        "protocol": "-1",
+                        "cidr_blocks": [
+                            "0.0.0.0/0"
+                        ],
+                        "description": "",
+                        "ipv6_cidr_blocks": [],
+                        "prefix_list_ids": [],
+                        "self": false
+                    }
+                ]
+            },
+            "cache": {
+                "name": "prod-cache-sg",
+                "description": "Strict firewall policy for caching infrastructure",
+                "vpc_id": "${aws_vpc.prod.id}",
+                "ingress": [
+                    {
+                        "from_port": 6379,
+                        "to_port": 6379,
+                        "protocol": "tcp",
+                        "security_groups": [
+                            "${aws_security_group.app.id}"
+                        ],
+                        "cidr_blocks": [],
+                        "description": "",
+                        "ipv6_cidr_blocks": [],
+                        "prefix_list_ids": [],
+                        "self": false
+                    }
+                ],
+                "egress": [
+                    {
+                        "from_port": 0,
+                        "to_port": 0,
+                        "protocol": "-1",
+                        "cidr_blocks": [
+                            "0.0.0.0/0"
+                        ],
+                        "description": "",
+                        "ipv6_cidr_blocks": [],
+                        "prefix_list_ids": [],
+                        "self": false
+                    }
+                ]
+            }
+        },
+        "aws_lb": {
+            "external": {
+                "name": "prod-application-alb",
+                "internal": false,
+                "load_balancer_type": "application",
+                "security_groups": [
+                    "${aws_security_group.lb.id}"
+                ],
+                "subnets": [
+                    "${aws_subnet.public_az1.id}",
+                    "${aws_subnet.public_az2.id}"
+                ]
+            }
+        },
+        "aws_lb_target_group": {
+            "app_target": {
+                "name": "prod-alb-target-group",
+                "port": 8080,
+                "protocol": "HTTP",
+                "vpc_id": "${aws_vpc.prod.id}",
+                "target_type": "instance",
+                "health_check": [
+                    {
+                        "path": "/health",
+                        "protocol": "HTTP",
+                        "port": "8080",
+                        "interval": 30,
+                        "timeout": 5,
+                        "healthy_threshold": 2,
+                        "unhealthy_threshold": 3
+                    }
+                ]
+            }
+        },
+        "aws_lb_listener": {
+            "http": {
+                "load_balancer_arn": "${aws_lb.external.arn}",
+                "port": 80,
+                "protocol": "HTTP",
+                "default_action": [
+                    {
+                        "type": "forward",
+                        "target_group_arn": "${aws_lb_target_group.app_target.arn}"
+                    }
+                ]
+            }
+        },
+        "aws_launch_template": {
+            "app_template": {
+                "name_prefix": "prod-app-launch-template-",
+                "image_id": "ami-0c55b159cbfafe1f0",
+                "instance_type": "t3.medium",
+                "iam_instance_profile": [
+                    {
+                        "arn": "${aws_iam_instance_profile.ec2_profile.arn}"
+                    }
+                ],
+                "network_interfaces": [
+                    {
+                        "associate_public_ip_address": false,
+                        "security_groups": [
+                            "${aws_security_group.app.id}"
+                        ]
+                    }
+                ],
+                "user_data": "IyEvYmluL2Jhc2gKZWNobyAiU3RhcnRpbmcgZW50ZXJwcmlzZSBub2RlIHByb2R1Y3Rpb24gYXBwbGljYXRpb24gc2V0dXAuLi4iID4gL3Zhci9sb2cvYXBwX2luaXQubG9nCg=="
+            }
+        },
+        "aws_autoscaling_group": {
+            "asg": {
+                "name_prefix": "prod-asg-",
+                "vpc_zone_identifier": [
+                    "${aws_subnet.app_az1.id}",
+                    "${aws_subnet.app_az2.id}"
+                ],
+                "target_group_arns": [
+                    "${aws_lb_target_group.app_target.arn}"
+                ],
+                "min_size": 2,
+                "max_size": 10,
+                "desired_capacity": 2,
+                "launch_template": [
+                    {
+                        "id": "${aws_launch_template.app_template.id}",
+                        "version": "$Latest"
+                    }
+                ],
+                "force_delete": true,
+                "health_check_type": "ELB",
+                "health_check_grace_period": 300,
+                "tag": [
+                    {
+                        "key": "Name",
+                        "value": "prod-asg-worker",
+                        "propagate_at_launch": true
+                    }
+                ]
+            }
+        },
+        "aws_db_subnet_group": {
+            "rds": {
+                "name": "prod-rds-db-subnet-group",
+                "subnet_ids": [
+                    "${aws_subnet.data_az1.id}",
+                    "${aws_subnet.data_az2.id}"
+                ],
+                "tags": {
+                    "Name": "prod-rds-subnet-group"
                 }
-            ]
+            }
+        },
+        "aws_db_instance": {
+            "postgres": {
+                "identifier": "prod-relational-database",
+                "allocated_storage": 20,
+                "max_allocated_storage": 100,
+                "db_name": "proddb",
+                "engine": "postgres",
+                "engine_version": "15.4",
+                "instance_class": "db.t3.micro",
+                "username": "dbadmin",
+                "password": "${var.db_password}",
+                "db_subnet_group_name": "${aws_db_subnet_group.rds.name}",
+                "vpc_security_group_ids": [
+                    "${aws_security_group.database.id}"
+                ],
+                "multi_az": true,
+                "storage_encrypted": true,
+                "kms_key_id": "${aws_kms_key.master_key.arn}",
+                "skip_final_snapshot": true
+            }
+        },
+        "aws_elasticache_subnet_group": {
+            "redis": {
+                "name": "prod-redis-cache-subnet-group",
+                "subnet_ids": [
+                    "${aws_subnet.data_az1.id}",
+                    "${aws_subnet.data_az2.id}"
+                ]
+            }
+        },
+        "aws_elasticache_replication_group": {
+            "cache_cluster": {
+                "replication_group_id": "prod-redis-cluster",
+                "description": "Production Enterprise Distributed Caching Cluster",
+                "node_type": "cache.t3.micro",
+                "num_cache_clusters": 2,
+                "engine": "redis",
+                "engine_version": "7.0",
+                "port": 6379,
+                "subnet_group_name": "${aws_elasticache_subnet_group.redis.name}",
+                "security_group_ids": [
+                    "${aws_security_group.cache.id}"
+                ],
+                "automatic_failover_enabled": true,
+                "at_rest_encryption_enabled": true,
+                "transit_encryption_enabled": false,
+                "kms_key_id": "${aws_kms_key.master_key.arn}"
+            }
+        },
+        "aws_sqs_queue": {
+            "jobs": {
+                "name": "prod-async-job-processing-queue",
+                "kms_master_key_id": "${aws_kms_key.master_key.id}",
+                "message_retention_seconds": 86400,
+                "receive_wait_time_seconds": 20
+            }
+        },
+        "aws_sns_topic": {
+            "alerts": {
+                "name": "prod-system-ops-alerts",
+                "kms_master_key_id": "${aws_kms_key.master_key.id}"
+            }
+        },
+        "aws_cloudwatch_metric_alarm": {
+            "asg_cpu_alarm": {
+                "alarm_name": "prod-asg-high-cpu-utilization-alarm",
+                "comparison_operator": "GreaterThanThreshold",
+                "evaluation_periods": 2,
+                "metric_name": "CPUUtilization",
+                "namespace": "AWS/EC2",
+                "period": 300,
+                "statistic": "Average",
+                "threshold": 80,
+                "alarm_description": "Triggered if application scale policy crosses 80% boundary limits",
+                "dimensions": {
+                    "AutoScalingGroupName": "${aws_autoscaling_group.asg.name}"
+                },
+                "alarm_actions": [
+                    "${aws_sns_topic.alerts.arn}"
+                ]
+            }
         }
     }
 }
