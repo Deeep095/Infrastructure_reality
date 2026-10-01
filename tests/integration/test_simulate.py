@@ -26,7 +26,7 @@ from reality import cli
 from reality.adapters.aws_resources import AwsResourcesAdapter
 from reality.domain.enums import ChangeAction, EvidenceSource, ResourceType
 from reality.domain.models import Resource, TerraformChange
-from reality.services.impact import DependentKind, RiskLevel, SimulateService
+from reality.services.impact import Assessment, DependentKind, RiskLevel, SimulateService
 from reality.services.reconcile import ReconcileService
 from reality.services.reports import stable_json
 from reality.services.scan import ScanService
@@ -284,8 +284,49 @@ def test_plan_without_destructive_targets_has_nothing_to_simulate(
     report = SimulateService(scanned).run(plan)
 
     assert report.targets == ()
-    assert report.risk is RiskLevel.LOW
+    # No destructive targets means nothing was assessed — which is not the
+    # same as a low risk.
+    assert report.risk is None
+    assert report.assessment is Assessment.NOT_APPLICABLE
     assert "no delete or replace targets" in report.notes[0]
+
+
+def test_unresolved_target_makes_the_assessment_incomplete(
+    scanned: ScanStore, tmp_path: Path
+) -> None:
+    # A delete target that resolves to nothing must not be reported as a clean
+    # low-risk plan: the assessment simply did not complete.
+    plan = write_plan(tmp_path, change("aws_instance.ghost", "aws_instance", "delete"))
+    report = SimulateService(scanned).run(plan)
+
+    assert len(report.targets) == 1
+    assert not report.targets[0].resolved
+    assert report.risk is None
+    assert report.assessment is Assessment.INCOMPLETE
+
+
+def test_fail_on_unknown_gates_an_incomplete_assessment(
+    scanned: ScanStore, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    plan = write_plan(tmp_path, change("aws_instance.ghost", "aws_instance", "delete"))
+    exit_code = cli.main(
+        ["--database", str(tmp_path / DATABASE_NAME), "simulate", str(plan), "--fail-on-unknown"]
+    )
+    assert exit_code == cli.EXIT_POLICY
+    # The report is still printed; only the exit code carries the verdict.
+    assert "assessment: incomplete" in capsys.readouterr().out
+
+
+def test_fail_on_unknown_passes_a_complete_assessment(
+    scanned: ScanStore, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    map_address_to_observed(scanned)
+    plan = write_plan(tmp_path, change("aws_security_group.web_sg", "aws_security_group", "delete"))
+    exit_code = cli.main(
+        ["--database", str(tmp_path / DATABASE_NAME), "simulate", str(plan), "--fail-on-unknown"]
+    )
+    assert exit_code == cli.EXIT_OK
+    assert "assessment: complete" in capsys.readouterr().out
 
 
 def test_unknown_coverage_keeps_the_floor_at_medium(tmp_path: Path) -> None:
@@ -326,7 +367,7 @@ def test_report_json_is_stable_across_runs(scanned: ScanStore, tmp_path: Path) -
     assert stable_json(first) == stable_json(second)
     assert "computed_at" not in stable_json(first)  # no timestamps: stable by construction
     parsed = json.loads(stable_json(first))
-    assert set(parsed) == {"plan_path", "depth", "risk", "targets", "notes"}
+    assert set(parsed) == {"plan_path", "depth", "risk", "assessment", "targets", "notes"}
     web_sg = next(target for target in parsed["targets"] if target["resolved"])
     # Both of this group's dependents are now CONFIRMED, so the band is MEDIUM:
     # known dependents, nothing undocumented. HIGH needs an undocumented one.

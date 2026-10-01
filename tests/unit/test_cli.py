@@ -133,7 +133,9 @@ class TestScanAwsOptIn:
 
         class FakeService:
             @classmethod
-            def from_config(cls, config, store, *, cloudtrail_window=None, client_factory=None):
+            def from_config(
+                cls, config, store, *, cloudtrail_window=None, client_factory=None, progress=None
+            ):
                 calls["config"] = config
                 calls["window"] = cloudtrail_window
                 return cls()
@@ -246,7 +248,9 @@ class TestScanCloudTrailWindow:
 
         class FakeService:
             @classmethod
-            def from_config(cls, config, store, *, cloudtrail_window=None, client_factory=None):
+            def from_config(
+                cls, config, store, *, cloudtrail_window=None, client_factory=None, progress=None
+            ):
                 calls["window"] = cloudtrail_window
                 return cls()
 

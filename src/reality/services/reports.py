@@ -21,6 +21,7 @@ from pydantic import BaseModel, ConfigDict
 from reality.domain.enums import Conclusion, CoverageStatus, EvidenceSource
 from reality.domain.ids import parse_canonical
 from reality.domain.models import Coverage, Finding, Relationship, Resource
+from reality.services.graph import IdentityResolver
 from reality.services.impact import Dependent, ImpactReport, SimulateReport
 from reality.services.reconcile import ReconciledRelationship, ReconcileReport
 from reality.storage.repositories import EvidenceRecord, ScanStore
@@ -131,10 +132,11 @@ class WhyService:
 
     def __init__(self, store: ScanStore) -> None:
         self._store = store
+        self._resolver = IdentityResolver(store.resources.all(), store.relationships.all())
 
     def explain(self, canonical_id: str) -> WhyReport | None:
         """The resource's evidence trail, or ``None`` if it was never stored."""
-        context = self._store.get_resource_context(canonical_id)
+        context = self._store.get_resource_context(canonical_id, resolver=self._resolver)
         if context is None:
             return None
         latest = self._latest_coverage()
@@ -236,7 +238,23 @@ def _conclusion_counts(report: ReconcileReport) -> str:
     return ", ".join(parts)
 
 
-def render_reconcile(report: ReconcileReport) -> str:
+def _missing_coverage(report: ReconcileReport) -> list[str]:
+    """One ``source (n)`` entry per source that blocked a conclusion.
+
+    Sorted by how many conclusions it blocked, then by name so the summary is
+    byte-stable. This is the actionable part of a summary: it names the inputs
+    the operator did not supply, which is what turns UNKNOWN into a fixable
+    next step rather than a shrug.
+    """
+    counts: dict[EvidenceSource, int] = {}
+    for item in report.findings:
+        for source in item.unavailable_sources:
+            counts[source] = counts.get(source, 0) + 1
+    ordered = sorted(counts.items(), key=lambda pair: (-pair[1], pair[0].value))
+    return [f"{source.value} ({count})" for source, count in ordered]
+
+
+def render_reconcile(report: ReconcileReport, *, verbose: bool = False) -> str:
     analysed = (
         f"analysing scan run {report.analysed_scan_run_id}"
         if report.analysed_scan_run_id is not None
@@ -246,27 +264,53 @@ def render_reconcile(report: ReconcileReport) -> str:
         f"reality: reconcile pass {report.scan_run_id} ({analysed})",
         f"  findings ({len(report.findings)}): {_conclusion_counts(report) or 'none'}",
     ]
+    if not report.findings:
+        lines.append("  none; the snapshot held no relationship candidates to compare")
+        return "\n".join(lines) + "\n"
+
     by_conclusion: dict[Conclusion, list[ReconciledRelationship]] = {}
     for item in report.findings:
         by_conclusion.setdefault(item.conclusion, []).append(item)
-    for conclusion in CONCLUSION_ORDER:
-        items = by_conclusion.get(conclusion)
-        if not items:
-            continue
-        lines.append(f"  {conclusion.value} ({len(items)}) - {CONCLUSION_GLOSS[conclusion]}:")
-        for item in items:
-            lines.append(
-                f"    - {item.source_canonical_id} -> {item.target_canonical_id} "
-                f"[{item.relationship_type.value}]"
-            )
-            lines.append(f"        {item.explanation}")
-            if item.evidence_ids:
-                lines.append(f"        evidence: {', '.join(item.evidence_ids)}")
-            if item.unavailable_sources:
-                missing = ", ".join(source.value for source in item.unavailable_sources)
-                lines.append(f"        missing coverage: {missing}")
-    if not report.findings:
-        lines.append("    none; the snapshot held no relationship candidates to compare")
+
+    if verbose:
+        # Full detailed output (original behavior)
+        for conclusion in CONCLUSION_ORDER:
+            items = by_conclusion.get(conclusion)
+            if not items:
+                continue
+            lines.append(f"  {conclusion.value} ({len(items)}) - {CONCLUSION_GLOSS[conclusion]}:")
+            for item in items:
+                lines.append(
+                    f"    - {item.source_canonical_id} -> {item.target_canonical_id} "
+                    f"[{item.relationship_type.value}]"
+                )
+                lines.append(f"        {item.explanation}")
+                if item.evidence_ids:
+                    lines.append(f"        evidence: {', '.join(item.evidence_ids)}")
+                if item.unavailable_sources:
+                    missing = ", ".join(source.value for source in item.unavailable_sources)
+                    lines.append(f"        missing coverage: {missing}")
+    else:
+        # Summary mode: counts, the actionable items, and what is missing.
+        for conclusion in CONCLUSION_ORDER:
+            items = by_conclusion.get(conclusion)
+            if not items:
+                continue
+            count = len(items)
+            lines.append(f"  {conclusion.value} ({count}) - {CONCLUSION_GLOSS[conclusion]}")
+            # For actionable conclusions, show first few items
+            if conclusion in (Conclusion.UNDOCUMENTED, Conclusion.POSSIBLE):
+                for item in items[:3]:
+                    source = _short_id(item.source_canonical_id)
+                    target = _short_id(item.target_canonical_id)
+                    lines.append(f"    - {source} -> {target} [{item.relationship_type.value}]")
+                if len(items) > 3:
+                    lines.append(f"    ... and {len(items) - 3} more")
+
+    missing_summary = _missing_coverage(report)
+    if missing_summary:
+        lines.append(f"  missing coverage: {', '.join(missing_summary)}")
+
     return "\n".join(lines) + "\n"
 
 
@@ -534,9 +578,13 @@ def render_simulate_table(report: SimulateReport) -> None:
     console = Console(force_terminal=True, legacy_windows=True, width=140)
 
     # Header
-    overall_risk_text = Text(report.risk.value.upper(), style=_risk_style(report.risk.value))
+    overall_risk_text = Text(
+        report.risk.value.upper() if report.risk is not None else "UNKNOWN",
+        style=_risk_style(report.risk.value) if report.risk is not None else "bold red",
+    )
     console.print(f"[bold cyan]reality: simulate {report.plan_path}[/bold cyan]")
     console.print("  [dim]read-only; the plan is never applied[/dim]")
+    console.print(f"  Assessment: {report.assessment.value}")
     console.print(f"  Overall Risk: {overall_risk_text}")
     console.print(f"  Targets: {len(report.targets)}")
 
@@ -742,7 +790,8 @@ def render_simulate_yaml(report: SimulateReport) -> str:
     data = {
         "command": "simulate",
         "plan_path": report.plan_path,
-        "overall_risk": report.risk.value,
+        "assessment": report.assessment.value,
+        "overall_risk": report.risk.value if report.risk is not None else None,
         "targets": [
             {
                 "address": t.address,
@@ -869,7 +918,8 @@ def render_simulate_csv(report: SimulateReport) -> str:
 
     writer.writerow(["command", "simulate"])
     writer.writerow(["plan_path", report.plan_path])
-    writer.writerow(["overall_risk", report.risk.value])
+    writer.writerow(["assessment", report.assessment.value])
+    writer.writerow(["overall_risk", report.risk.value if report.risk is not None else ""])
     writer.writerow([])
     writer.writerow(["targets"])
     writer.writerow(
@@ -1015,7 +1065,8 @@ def render_impact(report: ImpactReport) -> str:
 def render_simulate(report: SimulateReport) -> str:
     lines = [
         f"reality: simulate {report.plan_path} (read-only; the plan is never applied)",
-        f"  overall risk: {report.risk.value}",
+        f"  assessment: {report.assessment.value}",
+        f"  overall risk: {report.risk.value if report.risk is not None else 'unknown'}",
         f"  targets ({len(report.targets)}):",
     ]
     if not report.targets:

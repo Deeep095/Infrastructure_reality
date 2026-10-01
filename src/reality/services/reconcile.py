@@ -58,6 +58,7 @@ from reality.domain.enums import (
     RelationshipType,
 )
 from reality.domain.models import Finding
+from reality.services.graph import GraphView
 from reality.storage.repositories import ScanStore
 
 #: Which relationship origins count as declared / observed / permission input.
@@ -112,6 +113,21 @@ class ReconcileReport(BaseModel):
     analysed_scan_run_id: int | None = None
     findings: tuple[ReconciledRelationship, ...] = ()
     counts: dict[str, int] = {}
+
+    def filter_conclusion(self, conclusion: str) -> ReconcileReport:
+        """Return a new report with only findings matching the given conclusion."""
+        filtered = tuple(f for f in self.findings if f.conclusion.value == conclusion)
+        new_counts = dict(self.counts)
+        new_counts[conclusion] = len(filtered)
+        for k in new_counts:
+            if k != conclusion:
+                new_counts[k] = 0
+        return ReconcileReport(
+            scan_run_id=self.scan_run_id,
+            analysed_scan_run_id=self.analysed_scan_run_id,
+            findings=filtered,
+            counts=new_counts,
+        )
 
 
 class _Group:
@@ -240,21 +256,15 @@ def _classify(
             "declared by Terraform, but whether it is observed could not be "
             f"determined: {_describe_missing(missing)}",
         )
-    # Permission-only: usage of an IAM permission is observed by CloudTrail alone.
-    missing = _missing_sources(status, frozenset({EvidenceSource.CLOUDTRAIL}))
-    if status.get(EvidenceSource.CLOUDTRAIL) == CoverageStatus.AVAILABLE:
-        return (
-            Conclusion.POSSIBLE,
-            (),
-            "an IAM policy grants this permission and no usage was observed; CloudTrail "
-            "was consulted (management-plane events only, within its retention), so this "
-            f"is a possibility, not an observed dependency ({evidence_note})",
-        )
+    # Permission-only: usage of an IAM permission would be observed by
+    # CloudTrail data events, which LookupEvents does not expose, so this is
+    # never more than POSSIBLE.
     return (
-        Conclusion.UNKNOWN,
-        tuple(source for source, _ in missing),
-        "an IAM policy grants this permission, but whether it is used could not be "
-        f"checked: {_describe_missing(missing)}",
+        Conclusion.POSSIBLE,
+        (),
+        "an IAM policy grants this permission and no usage was observed; data-plane "
+        "usage is not visible to this scan, so this is a possibility, not a "
+        f"confirmed dependency ({evidence_note})",
     )
 
 
@@ -272,8 +282,9 @@ class ReconcileService:
 
     def run(self, scan_run_id: int | None = None) -> ReconcileReport:
         snapshot = self._snapshot(scan_run_id)
+        graph = GraphView(self._store, snapshot)
         status = _coverage_by_source(self._store, snapshot)
-        groups = self._group(snapshot)
+        groups = self._group(graph)
         items: list[ReconciledRelationship] = []
         for source, target, rel_type in sorted(
             groups, key=lambda key: (key[0], key[1], key[2].value)
@@ -356,7 +367,7 @@ class ReconcileService:
 
     # --- grouping ----------------------------------------------------------------
 
-    def _group(self, snapshot: int) -> dict[tuple[str, str, RelationshipType], _Group]:
+    def _group(self, graph: GraphView) -> dict[tuple[str, str, RelationshipType], _Group]:
         """Group the snapshot's candidates by their translated canonical triple.
 
         A Terraform identity with a snapshot identity mapping translates to
@@ -364,9 +375,9 @@ class ReconcileService:
         and unresolved identity) translates to itself, so unmapped declared
         candidates group only with exact string-equal counterparts, as before.
         """
-        translations = _translations(self._store, snapshot)
+        translations = _translations(self._store, graph.scan_run_id)
         groups: dict[tuple[str, str, RelationshipType], _Group] = {}
-        for relationship in self._store.relationships.for_scan_run(snapshot):
+        for relationship in graph.outgoing_all():
             translated_source, source_evidence = self._translate(
                 relationship.source_canonical_id, translations
             )

@@ -45,6 +45,7 @@ from reality.domain.enums import (
 from reality.domain.ids import (
     TERRAFORM_PROVIDER,
     UNRESOLVED_PROVIDER,
+    CanonicalId,
     IdParseError,
     parse_arn,
     parse_canonical,
@@ -114,10 +115,10 @@ def _match(declared: Resource, observed: Sequence[Resource]) -> ComputedMapping 
     """The one join for a declared resource, or ``None`` — never a guess."""
     if declared.arn is not None:
         try:
-            arn_id = parse_arn(declared.arn)
+            arn_id: CanonicalId | None = parse_arn(declared.arn)
         except IdParseError:
             arn_id = None  # an unparseable ARN cannot join; the native ID may
-        else:
+        if arn_id is not None:
             matches = [
                 resource
                 for resource in observed

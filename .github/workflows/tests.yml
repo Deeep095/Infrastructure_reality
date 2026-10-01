@@ -1,11 +1,13 @@
-# Minimal quality gate: formatter, linter, and the full test suite — offline.
+# Minimal quality gate: formatter, linter, type checker, and the full test
+# suite — offline.
 #
 # The suite must pass with no AWS credentials (they are pinned to empty
 # values below to prove nothing needs them) and without boto3 installed
 # (the core install only): the one botocore-Stubber test skips cleanly and
-# every other AWS-facing test uses scripted fake clients. The type checker
-# (mypy, configured in pyproject.toml) is not run here yet — it has not had
-# a verified local run; add it once `python -m mypy` passes locally.
+# every other AWS-facing test uses scripted fake clients.
+#
+# mypy is configured in pyproject.toml and runs with no boto3 installed, so
+# the type check is part of the same offline gate as the tests.
 name: tests
 
 on:
@@ -29,10 +31,39 @@ jobs:
         with:
           python-version: "3.12"
       - name: Install core package and dev tools (no boto3)
-        run: python -m pip install -e . pytest ruff
+        run: python -m pip install -e . pytest ruff mypy
       - name: Formatter check
         run: python -m ruff format --check src tests
       - name: Linter
         run: python -m ruff check src tests
+      - name: Type check
+        run: python -m mypy
+      - name: Tests (offline, no AWS credentials)
+        run: python -m pytest
+
+  windows:
+    # The tool must work on the platform most people actually run it on.
+    # Same offline gate, Windows runners only.
+    runs-on: windows-latest
+    env:
+      AWS_ACCESS_KEY_ID: ""
+      AWS_SECRET_ACCESS_KEY: ""
+      AWS_SESSION_TOKEN: ""
+      AWS_PROFILE: ""
+      AWS_REGION: ""
+      AWS_DEFAULT_REGION: ""
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install core package and dev tools (no boto3)
+        run: python -m pip install -e . pytest ruff mypy
+      - name: Formatter check
+        run: python -m ruff format --check src tests
+      - name: Linter
+        run: python -m ruff check src tests
+      - name: Type check
+        run: python -m mypy
       - name: Tests (offline, no AWS credentials)
         run: python -m pytest

@@ -42,9 +42,11 @@ from reality.domain.enums import (
     CoverageStatus,
     EvidenceSource,
     ImpactBasis,
+    _StrEnum,
 )
 from reality.domain.ids import TERRAFORM_PROVIDER
 from reality.domain.models import Relationship, Resource, TerraformChange
+from reality.services.graph import IdentityResolver
 from reality.services.reconcile import finding_id
 from reality.services.scan import ScanInputError
 from reality.storage.repositories import ScanStore
@@ -149,6 +151,19 @@ class SimulatedTarget(BaseModel):
     notes: tuple[str, ...] = ()
 
 
+class Assessment(_StrEnum):
+    """Whether every destructive target could be assessed.
+
+    Distinct from :class:`RiskLevel`: a plan whose targets are all unresolved
+    has no known risk to report, but calling that ``low`` would be wrong — the
+    assessment simply did not complete.
+    """
+
+    COMPLETE = "complete"
+    INCOMPLETE = "incomplete"
+    NOT_APPLICABLE = "not_applicable"
+
+
 class SimulateReport(BaseModel):
     """Blast radius of a local plan's destructive targets; nothing is applied."""
 
@@ -156,7 +171,8 @@ class SimulateReport(BaseModel):
 
     plan_path: str
     depth: int
-    risk: RiskLevel  # the highest target risk (LOW when nothing was computed)
+    risk: RiskLevel | None  # None when no target could be assessed
+    assessment: Assessment
     targets: tuple[SimulatedTarget, ...] = ()
     notes: tuple[str, ...] = ()
 
@@ -188,6 +204,7 @@ class ImpactService:
 
     def __init__(self, store: ScanStore) -> None:
         self._store = store
+        self._resolver = IdentityResolver(store.resources.all(), store.relationships.all())
 
     def blast_radius(
         self,
@@ -201,16 +218,19 @@ class ImpactService:
         Returns ``None`` when the subject has never been stored — an unknown
         resource has no honest blast radius, and guessing one is forbidden.
         """
-        resource = self._store.resources.get(subject_canonical_id)
+        resolved = self._resolve_subject(subject_canonical_id)
+        if resolved is None:
+            return None
+        resource = self._store.resources.get(resolved)
         if resource is None:
             return None
-        dependents, notes = self._traverse(subject_canonical_id, depth)
+        dependents, notes = self._traverse(resolved, depth)
         risk, coverage_notes = self._risk(resource, dependents)
         ordered = tuple(
             sorted(dependents.values(), key=lambda item: (item.depth, item.canonical_id))
         )
         return ImpactReport(
-            subject_canonical_id=subject_canonical_id,
+            subject_canonical_id=resolved,
             basis=basis,
             depth=depth,
             risk=risk,
@@ -219,6 +239,19 @@ class ImpactService:
         )
 
     # --- traversal -------------------------------------------------------------
+
+    def _resolve_subject(self, subject_canonical_id: str) -> str | None:
+        """The stored ID to report on, or ``None`` if the subject is unknown.
+
+        Resolves through compatible identities so a less-qualified reference
+        (an accountless S3 bucket ARN) reaches the stored, account-qualified
+        resource. The first stored match wins; an unresolvable subject stays
+        unknown rather than being guessed at.
+        """
+        for stored_id in self._resolver.resolve(subject_canonical_id):
+            if self._resolver.is_stored(stored_id):
+                return stored_id
+        return None
 
     def _traverse(self, subject: str, depth: int) -> tuple[dict[str, Dependent], tuple[str, ...]]:
         """Breadth-first walk against edge direction, bounded by ``depth``.
@@ -253,18 +286,24 @@ class ImpactService:
         return dependents, tuple(notes)
 
     def _incoming_by_source(self, node: str) -> tuple[tuple[str, tuple[Relationship, ...]], ...]:
-        """Incoming edges grouped by their source, in deterministic order."""
+        """Incoming edges grouped by their source, in deterministic order.
+
+        The node is resolved through every stored identity that denotes the
+        same resource, so an edge recorded against a less-qualified endpoint
+        (an accountless S3 bucket ARN) still reaches the stored bucket.
+        """
         grouped: dict[str, list[Relationship]] = {}
-        for edge in sorted(
-            self._store.relationships.incoming(node),
-            key=lambda item: (
-                item.source_canonical_id,
-                item.type.value,
-                item.origin.value,
-            ),
-        ):
+        for edge in self._resolver.incoming(node):
             grouped.setdefault(edge.source_canonical_id, []).append(edge)
-        return tuple((source, tuple(edges)) for source, edges in grouped.items())
+        ordered = sorted(
+            grouped.items(),
+            key=lambda item: (
+                item[0],
+                min(edge.type.value for edge in item[1]),
+                min(edge.origin.value for edge in item[1]),
+            ),
+        )
+        return tuple((source, tuple(edges)) for source, edges in ordered)
 
     def _dependent(
         self, path: tuple[str, ...], edge_groups: tuple[tuple[Relationship, ...], ...]
@@ -395,9 +434,24 @@ class SimulateService:
             plan_path=str(path),
             depth=depth,
             risk=self._overall(targets),
+            assessment=self._assessment(targets),
             targets=tuple(targets),
             notes=tuple(notes),
         )
+
+    @staticmethod
+    def _assessment(targets: Sequence[SimulatedTarget]) -> Assessment:
+        """Whether every destructive target could be assessed.
+
+        A plan with no destructive targets is not applicable. A plan where any
+        target is unresolved is incomplete — the known risk may be low, but the
+        assessment did not cover everything it was asked about.
+        """
+        if not targets:
+            return Assessment.NOT_APPLICABLE
+        if any(not target.resolved for target in targets):
+            return Assessment.INCOMPLETE
+        return Assessment.COMPLETE
 
     def _target(self, change: TerraformChange, *, depth: int) -> SimulatedTarget:
         canonical_id = self._resolve(change)
@@ -446,8 +500,13 @@ class SimulateService:
         return None
 
     @staticmethod
-    def _overall(targets: Sequence[SimulatedTarget]) -> RiskLevel:
+    def _overall(targets: Sequence[SimulatedTarget]) -> RiskLevel | None:
+        """The highest risk among the targets that could be assessed.
+
+        ``None`` when no target resolved — there is no known risk to report, which
+        is not the same as a low one.
+        """
         computed = [target.risk for target in targets if target.risk is not None]
         if not computed:
-            return RiskLevel.LOW
+            return None
         return max(computed, key=lambda risk: _RANK[risk])

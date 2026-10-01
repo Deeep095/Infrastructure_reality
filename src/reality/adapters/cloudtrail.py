@@ -467,7 +467,7 @@ class CloudTrailAdapter(Adapter):
             event_id = raw.get("EventId")
             if not isinstance(event_id, str) or not event_id.strip():
                 event_id = f"index-{index}"
-            event_name = _name(raw.get("EventName"), "(unknown event)")
+            event_name = _name(raw.get("EventName"), "(unknown event)") or "(unknown event)"
             event_source = _name(raw.get("EventSource"), None)
             where = f"{event_name} ({event_source})" if event_source else event_name
             event_time = _event_time(raw.get("EventTime"), observed_at)

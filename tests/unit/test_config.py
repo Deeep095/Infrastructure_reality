@@ -56,7 +56,23 @@ def test_require_aws_accepts_the_full_explicit_triple() -> None:
 def test_partial_aws_flags_rejected_without_opt_in(kwargs: dict[str, str]) -> None:
     config = RealityConfig(**kwargs)
     with pytest.raises(ConfigError, match="--aws"):
-        config.validate_aws_flags()
+        config.validate_aws_flags(
+            flag_profile=kwargs.get("aws_profile"),
+            flag_region=kwargs.get("aws_region"),
+        )
+
+
+def test_a_saved_profile_is_not_treated_as_an_opt_in_request() -> None:
+    """A configured profile/region must not make a local command fail.
+
+    Keeping a region configured is the normal way to use the tool, and the
+    safety guarantee is about reaching AWS - which still needs ``--aws`` - not
+    about refusing to remember a region name.
+    """
+    config = RealityConfig(aws_profile="sandbox", aws_region="eu-west-1")
+    config.validate_aws_flags(flag_profile=None, flag_region=None)  # must not raise
+    # ...and the config still is not AWS-ready, so no adapter would be built.
+    assert config.aws_ready is False
 
 
 def test_validate_aws_flags_passes_when_fully_offline() -> None:

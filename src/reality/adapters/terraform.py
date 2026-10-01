@@ -100,7 +100,7 @@ class TerraformAdapter(Adapter):
 
     name = "terraform"
 
-    def collect(self, path: str | Path) -> AdapterResult:  # type: ignore[override]
+    def collect(self, path: str | Path) -> AdapterResult:
         return self.parse_file(path)
 
     # --- entry points -------------------------------------------------------
@@ -302,7 +302,11 @@ class TerraformAdapter(Adapter):
             if raw.get("mode", "managed") == "data":
                 continue
             self._emit_links(raw, path, index, source, source_path, relationships, evidence)
-        address_map = {r.terraform_address: r.canonical_id for r in resources}
+        address_map = {
+            address: self._canonical_id(resource)
+            for resource in resources
+            if (address := resource.terraform_address) is not None
+        }
         return resources, relationships, evidence, address_map, unsupported
 
     def _walk_modules(self, module: dict[str, Any], path: str) -> list[tuple[dict[str, Any], str]]:
@@ -351,6 +355,19 @@ class TerraformAdapter(Adapter):
             return parse_terraform_address(address).key
         except IdParseError as err:
             raise AdapterError(f"invalid Terraform address: {err}", f"{path}.address") from err
+
+    @staticmethod
+    def _canonical_id(resource: Resource) -> str:
+        """The address-key canonical ID; never ``None`` for a declared resource.
+
+        ``_build_resource`` always sets ``canonical_id`` via ``_address_key``,
+        so the Optional in the model is a database-read concern, not a
+        declaration one. The check keeps the mapping's value type honest
+        instead of widening it to ``str | None``.
+        """
+        if resource.canonical_id is None:  # pragma: no cover - see docstring
+            raise AdapterError("declared resource has no canonical ID")
+        return resource.canonical_id
 
     # --- declared relationship candidates ------------------------------------
 

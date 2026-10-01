@@ -163,7 +163,6 @@ def conclusions(report: object) -> dict[str, Conclusion]:
 def full_coverage(session: ScanSession) -> None:
     add_coverage(session, EvidenceSource.TERRAFORM_STATE, CoverageStatus.AVAILABLE)
     add_coverage(session, EvidenceSource.AWS_RESOURCES, CoverageStatus.AVAILABLE)
-    add_coverage(session, EvidenceSource.CLOUDTRAIL, CoverageStatus.AVAILABLE)
 
 
 # --- the five conclusions -------------------------------------------------------
@@ -233,12 +232,11 @@ def test_iam_permission_without_usage_is_possible(store: ScanStore) -> None:
             origin=RelationshipOrigin.IAM_POLICY,
             evidence_id="iam:1",
         )
-        add_coverage(session, EvidenceSource.CLOUDTRAIL, CoverageStatus.AVAILABLE)
     report = ReconcileService(store).run()
 
     item = report.findings[0]
     assert item.conclusion == Conclusion.POSSIBLE
-    assert "possibility, not an observed dependency" in item.explanation
+    assert "possibility, not a confirmed dependency" in item.explanation
 
 
 def test_declared_without_observation_is_declared_only_not_inactive(store: ScanStore) -> None:
@@ -336,7 +334,14 @@ def test_unavailable_observation_blocks_declared_only(store: ScanStore) -> None:
     }
 
 
-def test_unavailable_cloudtrail_blocks_possible(store: ScanStore) -> None:
+def test_unavailable_cloudtrail_does_not_downgrade_permission_only(store: ScanStore) -> None:
+    """A granted permission is POSSIBLE even when CloudTrail is unavailable.
+
+    Data-plane usage is never visible to a management-event scan, so CloudTrail
+    coverage cannot decide this question in either direction. An UNAVAILABLE
+    management source is a gap in what was *observed*, not evidence that a
+    permission went unused, so it must not downgrade POSSIBLE to UNKNOWN.
+    """
     with seed_run(store) as session:
         add_candidate(
             session,
@@ -352,26 +357,42 @@ def test_unavailable_cloudtrail_blocks_possible(store: ScanStore) -> None:
     report = ReconcileService(store).run()
 
     item = report.findings[0]
-    assert item.conclusion == Conclusion.UNKNOWN  # permission may be used; we could not check
-    assert item.unavailable_sources == (EvidenceSource.CLOUDTRAIL,)
-    assert "cloudtrail: unavailable" in item.explanation
+    assert item.conclusion == Conclusion.POSSIBLE
+    assert item.unavailable_sources == ()
+    assert "data-plane usage is not visible" in item.explanation
 
 
 def test_latest_coverage_record_wins(store: ScanStore) -> None:
+    """Within one run, the most recent record for a source is the one that counts.
+
+    Both observed sources go available-then-unavailable. If the *earlier* record
+    won, the run would still look fully observed and the candidate would come
+    out DECLARED_ONLY; because the later record wins, neither observed source is
+    usable and the conclusion must be UNKNOWN.
+    """
     with seed_run(store) as session:
         add_candidate(
             session,
-            source=PROCESSOR_ROLE,
-            target=DATA_LAKE,
-            rel_type=RelationshipType.PERMISSION_ON,
-            origin=RelationshipOrigin.IAM_POLICY,
-            evidence_id="iam:1",
+            source=WEB,
+            target=WEB_SG,
+            rel_type=RelationshipType.ATTACHED_TO,
+            origin=RelationshipOrigin.TERRAFORM_DECLARED,
+            evidence_id="tf:1",
         )
+        add_coverage(session, EvidenceSource.TERRAFORM_STATE, CoverageStatus.AVAILABLE)
+        add_coverage(session, EvidenceSource.AWS_RESOURCES, CoverageStatus.AVAILABLE)
         add_coverage(session, EvidenceSource.CLOUDTRAIL, CoverageStatus.AVAILABLE)
         # The more recent record within the same run wins.
+        add_coverage(session, EvidenceSource.AWS_RESOURCES, CoverageStatus.UNAVAILABLE)
         add_coverage(session, EvidenceSource.CLOUDTRAIL, CoverageStatus.UNAVAILABLE)
     report = ReconcileService(store).run()
-    assert report.findings[0].conclusion == Conclusion.UNKNOWN
+
+    item = report.findings[0]
+    assert item.conclusion == Conclusion.UNKNOWN
+    assert set(item.unavailable_sources) == {
+        EvidenceSource.AWS_RESOURCES,
+        EvidenceSource.CLOUDTRAIL,
+    }
 
 
 # --- matching is exact triples only -----------------------------------------------

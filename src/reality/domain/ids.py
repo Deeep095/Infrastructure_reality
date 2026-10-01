@@ -342,6 +342,52 @@ def safe_join(a: CanonicalId, b: CanonicalId) -> bool:
     return a.account == b.account
 
 
+#: (service, resource_type) pairs whose names are unique across every account in
+#: a partition. For these, an accountless reference can resolve to an
+#: account-qualified one — the name alone identifies the resource.
+#:
+#: This is deliberately narrow. An IAM role name is *not* unique across accounts
+#: (``cleanup_role`` exists in many), so a regionless role still needs its
+#: account. Only types with a genuinely global namespace belong here.
+GLOBALLY_UNIQUE_TYPES: frozenset[tuple[str, str]] = frozenset({("s3", "bucket")})
+
+
+def resolve_compatible(query: CanonicalId, candidate: CanonicalId) -> bool:
+    """Whether ``query`` and ``candidate`` may denote the same concrete resource.
+
+    Like :func:`safe_join`, but narrows the accountless exception to resource
+    types whose names are globally unique within a partition. This is the rule
+    the graph traversal uses to follow an edge whose endpoint was recorded with
+    less identity than the stored resource — an accountless S3 bucket ARN
+    pointing at the account-qualified bucket the scan discovered, for instance.
+
+    A conflicting account or partition still refuses the join, and an unresolved
+    reference never resolves to anything.
+    """
+    if query.is_unresolved or candidate.is_unresolved:
+        return False
+    if (query.provider, query.service, query.resource_type, query.resource_id) != (
+        candidate.provider,
+        candidate.service,
+        candidate.resource_type,
+        candidate.resource_id,
+    ):
+        return False
+    if query.is_global or candidate.is_global:
+        if (query.service, query.resource_type) not in GLOBALLY_UNIQUE_TYPES:
+            # Not a globally-unique name: the account is part of identity.
+            return query.account == candidate.account
+        accounts_conflict = (
+            query.account is not None
+            and candidate.account is not None
+            and query.account != candidate.account
+        )
+        return not accounts_conflict
+    if query.region != candidate.region:
+        return False
+    return query.account == candidate.account
+
+
 def refine(
     cid: CanonicalId, *, region: str | None = None, account: str | None = None
 ) -> CanonicalId:

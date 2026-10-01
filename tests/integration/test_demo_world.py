@@ -185,3 +185,37 @@ def test_reconcile_is_idempotent_over_the_demo_world(
     assert cli.main(["--database", str(demo), "reconcile", "--json"]) == cli.EXIT_OK
     after = json.loads(capsys.readouterr().out)["findings"]
     assert before == after
+
+
+def test_a_less_qualified_reference_reaches_the_stored_resource(
+    demo: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """An accountless S3 ARN must reach the account-qualified stored bucket.
+
+    The scan stores the bucket as ``aws/s3/bucket/-/123456789012/data-lake``
+    while the edges that reference it were recorded as
+    ``aws/s3/bucket/-/-/data-lake``. Before the identity resolver these two
+    never matched, so the bucket reported ``dependents: none`` and ``risk:
+    low`` — it looked safe to delete when a role depended on it.
+    """
+    buffer = io.StringIO()
+    with redirect_stdout(buffer):
+        assert (
+            cli.main(["--database", str(demo), "impact", "aws/s3/bucket/-/-/data-lake", "--json"])
+            == cli.EXIT_OK
+        )
+    report = json.loads(buffer.getvalue())
+    # The accountless reference resolves to the stored, account-qualified bucket.
+    assert report["subject_canonical_id"] == "aws/s3/bucket/-/123456789012/data-lake"
+    # And the dependents that were previously invisible are now reported.
+    assert report["dependents"], "the bucket must show its dependents"
+    assert any(dependent["conclusion"] == "undocumented" for dependent in report["dependents"])
+    assert report["risk"] == "high"
+
+    # `why` resolves the same reference.
+    buffer = io.StringIO()
+    with redirect_stdout(buffer):
+        assert cli.main(["--database", str(demo), "why", "aws/s3/bucket/-/-/data-lake"]) == (
+            cli.EXIT_OK
+        )
+    assert "data-lake" in buffer.getvalue()

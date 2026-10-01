@@ -31,13 +31,22 @@ from typing import cast
 from reality.config import ConfigError, RealityConfig
 from reality.domain.ids import parse_canonical
 from reality.domain.models import Resource
+from reality.services.doctor import render_doctor, run_doctor
 from reality.services.impact import (
     DEFAULT_DEPTH,
+    Assessment,
     ImpactReport,
     ImpactService,
     RiskLevel,
     SimulateReport,
     SimulateService,
+)
+from reality.services.progress import (
+    Cancelled as ScanCancelled,
+)
+from reality.services.progress import (
+    ProgressReporter,
+    reporter_for_interactive,
 )
 from reality.services.reconcile import ReconcileReport, ReconcileService
 from reality.services.reports import (
@@ -63,6 +72,18 @@ from reality.services.reports import (
     stable_json,
 )
 from reality.services.scan import ScanInputError, ScanReport, ScanService
+from reality.settings import (
+    ENV_DATABASE,
+    ENV_PROFILE,
+    ENV_REGION,
+    ResolvedSetting,
+    SettingsError,
+    UserSettings,
+    config_path,
+    load_settings,
+    resolve_setting,
+    save_settings,
+)
 from reality.storage.migrations import migrate
 from reality.storage.repositories import ScanStore
 from reality.storage.sqlite import connect
@@ -73,6 +94,12 @@ EXIT_NOT_IMPLEMENTED = 3
 EXIT_CONFIG = 4
 EXIT_INPUT = 5
 EXIT_POLICY = 6
+#: A scan the operator stopped. Distinct from failure: nothing is wrong, the
+#: work simply did not finish, and the database was left unchanged.
+EXIT_INTERRUPTED = 130
+#: `reality doctor` found at least one failed check. Warnings and skipped
+#: optional extras still exit 0, because both leave the tool usable.
+EXIT_UNHEALTHY = 1
 
 
 class OutputFormat:
@@ -138,12 +165,18 @@ def _add_common_flags(parser: argparse.ArgumentParser, *, global_defaults: bool)
     "unrecognized arguments". Accepting them in both positions removes that
     trap. On the subparsers every default is ``argparse.SUPPRESS`` so a flag
     given only to the global parser is never overwritten by a default.
+
+    The global parser also uses ``SUPPRESS`` for ``--database``, ``--profile``
+    and ``--region`` so that "the user did not pass this" stays
+    distinguishable from "this is the default". Without that distinction the
+    settings file and the environment could never supply a value, because
+    argparse would have already filled in the built-in default.
     """
     parser.add_argument(
         "--database",
         type=Path,
-        default=RealityConfig().database_path if global_defaults else argparse.SUPPRESS,
-        help="local SQLite database file (default: %(default)s)",
+        default=argparse.SUPPRESS,
+        help="local SQLite database file (default: reality.db, or the config file)",
     )
     parser.add_argument(
         "--aws",
@@ -153,12 +186,12 @@ def _add_common_flags(parser: argparse.ArgumentParser, *, global_defaults: bool)
     )
     parser.add_argument(
         "--profile",
-        default=None if global_defaults else argparse.SUPPRESS,
+        default=argparse.SUPPRESS,
         help="named AWS profile; required with --aws",
     )
     parser.add_argument(
         "--region",
-        default=None if global_defaults else argparse.SUPPRESS,
+        default=argparse.SUPPRESS,
         help="AWS region; required with --aws",
     )
 
@@ -175,6 +208,40 @@ def build_parser() -> argparse.ArgumentParser:
     _add_common_flags(parser, global_defaults=True)
 
     sub = parser.add_subparsers(dest="command", metavar="COMMAND")
+
+    doctor = sub.add_parser(
+        "doctor",
+        help="check this machine: python, extras, config, database, and (opt-in) AWS",
+    )
+    _add_common_flags(doctor, global_defaults=False)
+
+    config_cmd = sub.add_parser(
+        "config",
+        help="show or edit the settings file used for defaults",
+    )
+    _add_common_flags(config_cmd, global_defaults=False)
+    config_cmd.add_argument(
+        "action",
+        nargs="?",
+        choices=("show", "path", "init"),
+        default="show",
+        help="show the effective settings (default), print the file's path, or write it",
+    )
+    config_cmd.add_argument(
+        "--set-database",
+        metavar="PATH",
+        help="with 'init': persist this database path",
+    )
+    config_cmd.add_argument(
+        "--set-profile",
+        metavar="NAME",
+        help="with 'init': persist this AWS profile name",
+    )
+    config_cmd.add_argument(
+        "--set-region",
+        metavar="NAME",
+        help="with 'init': persist this AWS region",
+    )
 
     scan = sub.add_parser(
         "scan",
@@ -216,6 +283,26 @@ def build_parser() -> argparse.ArgumentParser:
         "--json",
         action="store_true",
         help="alias for --output json",
+    )
+    rec.add_argument(
+        "--verbose",
+        action="store_true",
+        help="show full finding details instead of summary",
+    )
+    rec.add_argument(
+        "--fail-on",
+        choices=("never", "confirmed", "undocumented", "possible", "declared_only", "unknown"),
+        default="never",
+        help=(
+            "exit 6 when findings of this conclusion or worse are present; "
+            "order is confirmed < undocumented < possible < declared_only < unknown "
+            "(default: %(default)s)"
+        ),
+    )
+    rec.add_argument(
+        "--conclusion",
+        choices=("confirmed", "undocumented", "possible", "declared_only", "unknown"),
+        help="filter output to only findings with this conclusion",
     )
     why = sub.add_parser("why", help="explain why a resource exists (evidence and conclusions)")
     _add_common_flags(why, global_defaults=False)
@@ -293,14 +380,179 @@ def build_parser() -> argparse.ArgumentParser:
             "the report is printed either way (default: %%(default)s)"
         ),
     )
+    simulate.add_argument(
+        "--fail-on-unknown",
+        action="store_true",
+        help=(
+            f"also exit {EXIT_POLICY} when any destructive target could not be "
+            "assessed; a plan whose targets are unresolved is inconclusive, "
+            "not safe"
+        ),
+    )
 
     return parser
 
 
-def _dispatch(command: str, config: RealityConfig, args: argparse.Namespace) -> int:
+def _flag(args: argparse.Namespace, name: str) -> str | Path | None:
+    """The raw flag value, or ``None`` if the user did not pass it.
+
+    Not every common flag is a string: ``--database`` is parsed to a ``Path``
+    and the shared parser lets the subparser override the global value, so the
+    resolved value can be either. Returning ``None`` only for a genuinely
+    absent flag is what keeps a supplied value from being silently dropped.
+    """
+    value = getattr(args, name, None)
+    if value is None or value == "":
+        return None
+    if isinstance(value, (str, Path)):
+        return value
+    return str(value)
+
+
+def _string_flag(args: argparse.Namespace, name: str) -> str | None:
+    """A flag known to be a plain string (profile, region)."""
+    value = _flag(args, name)
+    return value if isinstance(value, str) else None
+
+
+def _resolve_aws(
+    args: argparse.Namespace, settings: UserSettings
+) -> tuple[ResolvedSetting, ResolvedSetting]:
+    """The AWS profile and region, each with where it came from."""
+    profile = resolve_setting(
+        _string_flag(args, "profile"),
+        env_name=ENV_PROFILE,
+        file_value=settings.profile,
+        default=None,
+    )
+    region = resolve_setting(
+        _string_flag(args, "region"),
+        env_name=ENV_REGION,
+        file_value=settings.region,
+        default=None,
+    )
+    return profile, region
+
+
+def _aws_origin_note(args: argparse.Namespace, settings: UserSettings) -> str | None:
+    """A note naming the account context an AWS read is about to use.
+
+    Returned only when at least one half of the triple came from somewhere
+    other than the command line. A saved profile is a convenience, but it means
+    ``--aws`` alone can read an account the command line never names, so the
+    run states which one it resolved and from where. When the user typed both
+    values there is nothing to disclose - they are already on screen.
+    """
+    profile, region = _resolve_aws(args, settings)
+    if profile.source == "command line" and region.source == "command line":
+        return None
+    return (
+        f"reality: reading AWS as profile {profile.value!r} [{profile.source}], "
+        f"region {region.value!r} [{region.source}]"
+    )
+
+
+def _build_config(args: argparse.Namespace, settings: UserSettings) -> RealityConfig:
+    """Resolve the runtime config from flags, environment, file, then default.
+
+    Precedence is fixed and documented in :mod:`reality.settings`. The one
+    thing that never comes from the file is the AWS opt-in: ``--aws`` is a
+    per-invocation decision, so ``aws_opt_in`` reads only the flag.
+    """
+    database_flag = _flag(args, "database")
+    database = resolve_setting(
+        str(database_flag) if isinstance(database_flag, Path) else database_flag,
+        env_name=ENV_DATABASE,
+        file_value=settings.database,
+        default="reality.db",
+    )
+    profile, region = _resolve_aws(args, settings)
+    # The database always resolves: it has a built-in default, unlike the AWS
+    # profile and region, which stay absent until something supplies them.
+    if database.value is None:  # pragma: no cover - a default is always given
+        raise SettingsError("no database path resolved")
+    return RealityConfig(
+        database_path=Path(database.value),
+        aws_opt_in=bool(getattr(args, "aws", False)),
+        aws_profile=profile.value,
+        aws_region=region.value,
+    )
+
+
+def _run_doctor(config: RealityConfig) -> int:
+    """Report on the environment and return 0 or 1."""
+    report = run_doctor(config)
+    sys.stdout.write(render_doctor(report))
+    return EXIT_OK if report.healthy else EXIT_UNHEALTHY
+
+
+def _run_config(args: argparse.Namespace) -> int:
+    """Show the effective settings, or print/write the settings file."""
+    path = config_path()
+    if args.action == "path":
+        print(path)
+        return EXIT_OK
+
+    try:
+        settings, path = load_settings(path)
+    except SettingsError as err:
+        print(f"reality: error: {err}", file=sys.stderr)
+        return EXIT_CONFIG
+
+    if args.action == "init":
+        given = (args.set_database, args.set_profile, args.set_region)
+        if not any(value is not None for value in given):
+            print(
+                "reality: nothing to write; pass --set-database, --set-profile, "
+                "or --set-region (e.g. reality config init --set-profile default "
+                "--set-region eu-west-1)"
+            )
+            return EXIT_USAGE
+        merged = UserSettings(
+            database=args.set_database or settings.database,
+            profile=args.set_profile or settings.profile,
+            region=args.set_region or settings.region,
+        )
+        written = save_settings(merged, path)
+        print(f"reality: wrote {written}")
+        return EXIT_OK
+
+    # "show": the effective values *and* where each came from, so "why is my
+    # region eu-west-1?" is answerable without reading three files.
+    env = {
+        "database": ENV_DATABASE,
+        "profile": ENV_PROFILE,
+        "region": ENV_REGION,
+    }
+    defaults = {"database": "reality.db", "profile": None, "region": None}
+    print(f"reality: settings file: {path}")
+    if not path.is_file():
+        print("  (none; built-in defaults apply)")
+    for field in ("database", "profile", "region"):
+        resolved = resolve_setting(
+            # The real flag, so `config --region X show` answers "what would X
+            # win with?" without the reader having to know the precedence rules.
+            _string_flag(args, field),
+            env_name=env[field],
+            file_value=getattr(settings, field),
+            default=defaults[field],
+        )
+        shown = resolved.value if resolved.value is not None else "(none)"
+        print(f"  {field:<9} {shown}  [{resolved.source}]")
+    print("  aws opt-in is never persisted; every AWS read needs --aws on the command line")
+    return EXIT_OK
+
+
+def _dispatch(
+    command: str, config: RealityConfig, args: argparse.Namespace, settings: UserSettings
+) -> int:
     """Run a command and return its exit code."""
+    if command == "doctor":
+        return _run_doctor(config)
+    if command == "config":
+        return _run_config(args)
     if command == "scan":
-        _run_scan(config, args)
+        _run_scan(config, args, settings)
     elif command == "reconcile":
         return _run_reconcile(config, args)
     elif command == "why":
@@ -338,7 +590,18 @@ def _cloudtrail_window(
     return bounds[0], bounds[1]
 
 
-def _run_scan(config: RealityConfig, args: argparse.Namespace) -> None:
+def _progress_reporter() -> ProgressReporter:
+    """The progress indicator this terminal can support.
+
+    Silent when stderr is redirected, so a piped log gets the report and
+    nothing else. There is deliberately no flag to force it on: progress that
+    a user cannot see the terminal state of is noise in their log, and they
+    can always redirect stderr away from a terminal.
+    """
+    return reporter_for_interactive()
+
+
+def _run_scan(config: RealityConfig, args: argparse.Namespace, settings: UserSettings) -> None:
     """Wire the config into the scan orchestrator and run it.
 
     The AWS-side adapters are constructed only when the complete explicit
@@ -347,13 +610,26 @@ def _run_scan(config: RealityConfig, args: argparse.Namespace) -> None:
     """
     if config.aws_opt_in:
         config.require_aws()
+        # Stderr, so a redirected report stays machine-readable. Printed before
+        # the first call, because "which account did this read?" is not a
+        # question to answer after the fact.
+        note = _aws_origin_note(args, settings)
+        if note is not None:
+            print(note, file=sys.stderr)
     window = _cloudtrail_window(config, args)
     conn = connect(config.database_path)
     try:
         migrate(conn)
         store = ScanStore(conn)
-        service = ScanService.from_config(config, store, cloudtrail_window=window)
+        service = ScanService.from_config(
+            config, store, cloudtrail_window=window, progress=_progress_reporter()
+        )
         report = service.run(args.paths)
+    except (KeyboardInterrupt, ScanCancelled) as err:
+        # The scan writes one transaction at the end, so stopping here leaves
+        # the database exactly as it was: no partial run, no half-written rows.
+        reason = "cancelled" if isinstance(err, ScanCancelled) else "interrupted"
+        raise ScanCancelled(f"scan {reason}") from err
     finally:
         conn.close()
     _print_scan_report(report, config)
@@ -420,8 +696,28 @@ def _run_reconcile(config: RealityConfig, args: argparse.Namespace) -> int:
         except ValueError as exc:
             # No discovery scan to analyse, or an unknown/reconciliation run.
             raise ScanInputError(str(exc)) from exc
-    rendered = _render_output(report, args.output, "reconcile", args)
-    return rendered
+        # Filter by conclusion if requested.
+        if args.conclusion is not None:
+            report = report.filter_conclusion(args.conclusion)
+        # Apply --fail-on gate (based on conclusion severity order).
+        fail_code = _fail_on_conclusion(report, args.fail_on)
+        rendered = _render_output(report, args.output, "reconcile", args)
+        return fail_code if fail_code else rendered
+
+
+def _fail_on_conclusion(report: ReconcileReport, threshold: str) -> int:
+    """Return exit code 6 if any finding meets or exceeds the conclusion threshold.
+
+    Severity order: confirmed < undocumented < possible < declared_only < unknown.
+    """
+    if threshold == "never":
+        return EXIT_OK
+    order = ("confirmed", "undocumented", "possible", "declared_only", "unknown")
+    threshold_idx = order.index(threshold)
+    for finding in report.findings:
+        if finding.conclusion in order[: threshold_idx + 1]:
+            return EXIT_POLICY
+    return EXIT_OK
 
 
 def _typed_values(resource: Resource) -> tuple[str, ...]:
@@ -521,17 +817,23 @@ def _run_simulate(config: RealityConfig, args: argparse.Namespace) -> int:
     rendered = _render_output(report, args.output, "simulate", args)
     if rendered != EXIT_OK:
         return rendered
+    # An inconclusive assessment is a verdict of its own: a plan whose targets
+    # could not be resolved is not safe to proceed on, whatever the known risk.
+    if args.fail_on_unknown and report.assessment is not Assessment.COMPLETE:
+        return EXIT_POLICY
     return _fail_on(report.risk, args.fail_on)
 
 
-def _fail_on(risk: RiskLevel, threshold: str) -> int:
+def _fail_on(risk: RiskLevel | None, threshold: str) -> int:
     """Whether the caller's own risk threshold was met.
 
     The report has already been printed by the time this runs: the exit code
     carries the verdict, never the explanation. ``--fail-on never`` always
-    succeeds, and an unresolved target (whose risk is unknown, not high) never
-    trips a threshold.
+    succeeds, and an unknown risk (``None``) never trips a threshold — absence
+    of a computed risk is not a low one.
     """
+    if risk is None:
+        return EXIT_OK
     floor = _FAIL_ON_BAND.get(threshold)
     if floor is None:
         return EXIT_OK
@@ -568,7 +870,7 @@ def _render_output(
         elif output_format == OutputFormat.TABLE:
             _render_table(report, command)
         else:  # TEXT (default)
-            _render_text(report, command)
+            _render_text(report, command, bool(getattr(args, "verbose", False)))
     except MissingTableExtra as exc:
         # rich is an optional display dependency; report the fix instead of
         # letting an ImportError escape as a traceback.
@@ -578,9 +880,15 @@ def _render_output(
 
 
 def _render_text(
-    report: WhyReport | ImpactReport | SimulateReport | ReconcileReport, command: str
+    report: WhyReport | ImpactReport | SimulateReport | ReconcileReport,
+    command: str,
+    verbose: bool = False,
 ) -> None:
-    """Render report as plain text (legacy format)."""
+    """Render report as plain text (legacy format).
+
+    ``verbose`` is only meaningful for ``reconcile``, whose default text output
+    is a summary; every other report already renders in full.
+    """
     if command == "why":
         sys.stdout.write(render_why(cast(WhyReport, report)))
     elif command == "impact":
@@ -588,7 +896,7 @@ def _render_text(
     elif command == "simulate":
         sys.stdout.write(render_simulate(cast(SimulateReport, report)))
     elif command == "reconcile":
-        sys.stdout.write(render_reconcile(cast(ReconcileReport, report)))
+        sys.stdout.write(render_reconcile(cast(ReconcileReport, report), verbose=verbose))
 
 
 def _render_table(
@@ -641,20 +949,42 @@ def main(argv: Sequence[str] | None = None) -> int:
         parser.print_help(sys.stderr)
         return EXIT_USAGE
     try:
-        config = RealityConfig(
-            database_path=args.database,
-            aws_opt_in=args.aws,
-            aws_profile=args.profile,
-            aws_region=args.region,
-        )
-        config.validate_aws_flags()
-        return _dispatch(args.command, config, args)
+        try:
+            settings, _ = load_settings()
+        except SettingsError:
+            # `doctor` is the command you run *because* something is broken, so
+            # it must survive a settings file it cannot parse and report the
+            # problem as one failed check. Every other command refuses, because
+            # silently ignoring a file the user wrote is how a typo turns into
+            # a run that used the wrong defaults without anyone noticing.
+            if args.command != "doctor":
+                raise
+            settings = UserSettings()
+        config = _build_config(args, settings)
+        # Only explicitly typed flags are policed; a saved profile or region is
+        # a preference, not a request to read AWS. `config` is exempt entirely:
+        # inspecting what a flag *would* resolve to is the whole point of it.
+        if args.command != "config":
+            config.validate_aws_flags(
+                flag_profile=_string_flag(args, "profile"),
+                flag_region=_string_flag(args, "region"),
+            )
+        return _dispatch(args.command, config, args, settings)
+    except SettingsError as exc:
+        print(f"reality: error: {exc}", file=sys.stderr)
+        return EXIT_CONFIG
     except ConfigError as exc:
         print(f"reality: error: {exc}", file=sys.stderr)
         return EXIT_CONFIG
     except ScanInputError as exc:
         print(f"reality: error: {exc}", file=sys.stderr)
         return EXIT_INPUT
+    except ScanCancelled as exc:
+        # A cancelled or interrupted scan wrote nothing: the scan is a single
+        # transaction, so an operator who stops it is not left with a partial
+        # run to reason about.
+        print(f"reality: {exc}; nothing was written", file=sys.stderr)
+        return EXIT_INTERRUPTED
     except CommandNotImplemented as exc:
         print(f"reality: {exc}", file=sys.stderr)
         return EXIT_NOT_IMPLEMENTED

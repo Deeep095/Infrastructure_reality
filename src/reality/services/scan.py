@@ -42,6 +42,7 @@ from reality.config import ConfigError, RealityConfig
 from reality.domain.enums import CoverageStatus, EvidenceSource
 from reality.domain.models import Coverage
 from reality.services.identity import compute_identity_mappings
+from reality.services.progress import NullProgressReporter, ProgressReporter, guard
 from reality.storage.repositories import ScanSession, ScanStore
 
 
@@ -87,6 +88,7 @@ class ScanService:
         iam: IamAdapter | None = None,
         cloudtrail: CloudTrailAdapter | None = None,
         region: str | None = None,
+        progress: ProgressReporter | None = None,
     ) -> None:
         self._store = store
         self._terraform = terraform if terraform is not None else TerraformAdapter()
@@ -96,6 +98,11 @@ class ScanService:
             ("cloudtrail", cloudtrail, EvidenceSource.CLOUDTRAIL),
         )
         self._region = region
+        # Silent by default: a library caller and the test suite get no output,
+        # and only an interactive terminal opts into progress.
+        self._progress: ProgressReporter = (
+            progress if progress is not None else NullProgressReporter()
+        )
 
     @classmethod
     def from_config(
@@ -105,6 +112,7 @@ class ScanService:
         *,
         cloudtrail_window: tuple[datetime, datetime] | None = None,
         client_factory: ClientFactory | None = None,
+        progress: ProgressReporter | None = None,
     ) -> ScanService:
         """Build a service honouring the AWS opt-in contract.
 
@@ -119,6 +127,18 @@ class ScanService:
         cloudtrail: CloudTrailAdapter | None = None
         region: str | None = None
         if config.aws_ready:
+            if client_factory is None:
+                # boto3 is an optional extra, imported lazily by each adapter's
+                # default client factory. Checking here means a missing extra is
+                # a one-line install hint rather than an ImportError raised
+                # three frames deeper. An injected factory needs no boto3 at all,
+                # which is why this is guarded rather than unconditional.
+                try:
+                    import boto3  # noqa: F401
+                except ImportError as err:
+                    raise ConfigError(
+                        "--aws needs boto3, which is not installed; run: pip install 'reality[aws]'"
+                    ) from err
             aws_resources = AwsResourcesAdapter.from_config(config, client_factory=client_factory)
             iam = IamAdapter.from_config(config, client_factory=client_factory)
             if cloudtrail_window is not None:
@@ -133,6 +153,7 @@ class ScanService:
             iam=iam,
             cloudtrail=cloudtrail,
             region=region,
+            progress=progress,
         )
 
     # --- entry point ----------------------------------------------------------
@@ -140,39 +161,54 @@ class ScanService:
     def run(self, terraform_paths: Sequence[Path | str] = ()) -> ScanReport:
         """Collect every requested source and persist one scan run."""
         paths = [Path(p) for p in terraform_paths]
-        if not paths and not any(adapter is not None for _, adapter, _ in self._aws_sources):
+        active_aws = [
+            (label, adapter, source)
+            for label, adapter, source in self._aws_sources
+            if adapter is not None
+        ]
+        if not paths and not active_aws:
             raise ConfigError(
                 "nothing to scan: pass at least one Terraform JSON path, or opt into "
                 "AWS with --aws --profile PROFILE --region REGION"
             )
 
-        # Local inputs first: an invalid path aborts before anything is written.
-        terraform_results = [self._parse_local(path) for path in paths]
+        # One unit of work per source. Progress is announced for the whole run
+        # up front so the total is honest, and cancellation is checked at each
+        # source boundary - a scan writes one transaction at the end, so
+        # stopping early leaves the database untouched.
+        units = len(paths) + len(active_aws)
+        with guard(self._progress, units, f"scanning {units} source(s)") as progress:
+            # Local inputs first: an invalid path aborts before anything is written.
+            terraform_results: list[AdapterResult] = []
+            for path in paths:
+                progress.check()
+                terraform_results.append(self._parse_local(path))
+                progress.step(f"parsed {path.name}")
 
-        # Opted-in AWS-side sources. An adapter-level failure is coverage
-        # (UNAVAILABLE), not a crash: the scan succeeds with reduced coverage.
-        aws_results: list[tuple[str, EvidenceSource, AdapterResult]] = []
-        for label, adapter, source in self._aws_sources:
-            if adapter is None:
-                continue
-            try:
-                aws_results.append((label, source, adapter.collect()))
-            except AdapterError as err:
-                aws_results.append(
-                    (
-                        label,
-                        source,
-                        AdapterResult(
-                            coverage=(
-                                Coverage(
-                                    source=source,
-                                    status=CoverageStatus.UNAVAILABLE,
-                                    reason=f"the {label} adapter could not complete: {err}",
-                                ),
-                            )
-                        ),
+            # Opted-in AWS-side sources. An adapter-level failure is coverage
+            # (UNAVAILABLE), not a crash: the scan succeeds with reduced coverage.
+            aws_results: list[tuple[str, EvidenceSource, AdapterResult]] = []
+            for label, adapter, source in active_aws:
+                progress.check()
+                progress.step(f"reading {label}")
+                try:
+                    aws_results.append((label, source, adapter.collect()))
+                except AdapterError as err:
+                    aws_results.append(
+                        (
+                            label,
+                            source,
+                            AdapterResult(
+                                coverage=(
+                                    Coverage(
+                                        source=source,
+                                        status=CoverageStatus.UNAVAILABLE,
+                                        reason=(f"the {label} adapter could not complete: {err}"),
+                                    ),
+                                )
+                            ),
+                        )
                     )
-                )
 
         results = [*terraform_results, *(result for _, _, result in aws_results)]
         not_requested = self._not_requested_coverage(paths)

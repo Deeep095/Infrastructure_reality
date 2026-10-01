@@ -26,7 +26,7 @@ import sqlite3
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from datetime import UTC, datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel, ConfigDict
 
@@ -52,6 +52,17 @@ from reality.domain.models import (
     TerraformChange,
 )
 from reality.storage.sqlite import transaction
+
+if TYPE_CHECKING:
+    from reality.services.graph import IdentityResolver
+
+
+def _resolve_stored(resolver: IdentityResolver, canonical_id: str) -> str | None:
+    """The first stored ID compatible with ``canonical_id``, or ``None``."""
+    for candidate in resolver.resolve(canonical_id):
+        if resolver.is_stored(candidate):
+            return candidate
+    return None
 
 
 def _dt(value: datetime | None) -> str | None:
@@ -111,7 +122,9 @@ class ScanRunRepository:
             "INSERT INTO scan_runs (source, region, account, started_at) VALUES (?, ?, ?, ?)",
             (source.value, region, account, (started_at or datetime.now(UTC)).isoformat()),
         )
-        return int(cursor.lastrowid)
+        if cursor.lastrowid is None:  # pragma: no cover - sqlite always sets this
+            raise sqlite3.IntegrityError("scan run insert produced no row id")
+        return cursor.lastrowid
 
     def finish(self, scan_run_id: int, finished_at: datetime | None = None) -> None:
         self._conn.execute(
@@ -158,6 +171,12 @@ class ResourceRepository:
         ``discovered_at`` is fixed at first insert (never rewritten).
         Descriptive fields merge: a later upsert may fill in fields that
         were ``None`` but never blanks one that is already set.
+
+        ``scan_run_id`` is the run that most recently observed this resource,
+        which is what makes snapshot-scoped reads (``for_scan_run``) answer
+        "what did *this* scan see?". ``discovered_at`` already carries
+        first-seen, so keeping the original run here instead would make every
+        re-observation invisible to the scan that performed it.
         """
         self._conn.execute(
             """
@@ -176,7 +195,7 @@ class ResourceRepository:
                 account           = COALESCE(resources.account, excluded.account),
                 name              = COALESCE(excluded.name, resources.name),
                 source            = COALESCE(excluded.source, resources.source),
-                scan_run_id       = excluded.scan_run_id
+                scan_run_id       = COALESCE(excluded.scan_run_id, resources.scan_run_id)
             """,
             (
                 resource.canonical_id,
@@ -216,6 +235,17 @@ class ResourceRepository:
         """
         rows = self._conn.execute("SELECT * FROM resources ORDER BY canonical_id").fetchall()
         return [self._hydrate(row) for row in rows]
+
+    def for_scan_run(self, scan_run_id: int) -> tuple[Resource, ...]:
+        """Resources that were observed or declared in a specific scan run.
+
+        A resource belongs to a scan run if it was upserted during that run.
+        """
+        rows = self._conn.execute(
+            "SELECT * FROM resources WHERE scan_run_id = ? ORDER BY canonical_id",
+            (scan_run_id,),
+        ).fetchall()
+        return tuple(self._hydrate(row) for row in rows)
 
     @staticmethod
     def _hydrate(row: sqlite3.Row) -> Resource:
@@ -272,7 +302,7 @@ class EvidenceRepository:
                 raw_locator         = excluded.raw_locator,
                 explanation         = excluded.explanation,
                 raw_json            = COALESCE(excluded.raw_json, evidence.raw_json),
-                scan_run_id         = excluded.scan_run_id
+                scan_run_id         = COALESCE(excluded.scan_run_id, evidence.scan_run_id)
             """,
             (
                 evidence.id,
@@ -392,7 +422,11 @@ class RelationshipRepository:
 
     def all(self) -> tuple[Relationship, ...]:
         """Every stored relationship candidate, in deterministic identity order."""
-        return self._for("1=1 ORDER BY source_canonical_id, target_canonical_id, type, origin", ())
+        rows = self._conn.execute(
+            "SELECT * FROM relationships "
+            "ORDER BY source_canonical_id, target_canonical_id, type, origin"
+        ).fetchall()
+        return tuple(self._hydrate(row) for row in rows)
 
     def for_scan_run(self, scan_run_id: int) -> tuple[Relationship, ...]:
         """The candidates a scan run actually (re)observed, in identity order.
@@ -539,6 +573,22 @@ class TerraformAddressRepository:
             ),
         )
 
+    def for_scan_run(self, scan_run_id: int) -> tuple[TerraformChange, ...]:
+        """Terraform address records written by a specific scan run."""
+        rows = self._conn.execute(
+            "SELECT * FROM terraform_addresses WHERE scan_run_id = ? ORDER BY address",
+            (scan_run_id,),
+        ).fetchall()
+        return tuple(
+            TerraformChange(
+                address=row["address"],
+                tf_resource_type=row["tf_resource_type"],
+                actions=tuple(ChangeAction(a) for a in _load_json_list(row["actions_json"])),
+                canonical_id=row["canonical_id"],
+            )
+            for row in rows
+        )
+
     def get(self, address: str) -> TerraformChange | None:
         row = self._conn.execute(
             "SELECT * FROM terraform_addresses WHERE address = ?", (address,)
@@ -658,6 +708,13 @@ class FindingRepository:
         row = self._conn.execute("SELECT * FROM findings WHERE id = ?", (finding_id,)).fetchone()
         return self._hydrate(row) if row is not None else None
 
+    def for_scan_run(self, scan_run_id: int) -> tuple[Finding, ...]:
+        """Findings written by a specific scan run."""
+        rows = self._conn.execute(
+            "SELECT * FROM findings WHERE scan_run_id = ? ORDER BY id", (scan_run_id,)
+        ).fetchall()
+        return tuple(self._hydrate(row) for row in rows)
+
     def for_subject(self, canonical_id: str) -> tuple[Finding, ...]:
         rows = self._conn.execute(
             "SELECT * FROM findings WHERE subject_canonical_id = ?", (canonical_id,)
@@ -764,7 +821,9 @@ class ScanStore:
             yield ScanSession(self, run_id)
             self.scan_runs.finish(run_id)
 
-    def get_resource_context(self, canonical_id: str) -> ResourceContext | None:
+    def get_resource_context(
+        self, canonical_id: str, *, resolver: IdentityResolver | None = None
+    ) -> ResourceContext | None:
         """Resource plus its relationships, linked evidence, and coverage.
 
         The read behind ``reality why`` and ``reality impact``: one call
@@ -772,12 +831,26 @@ class ScanStore:
         its evidence IDs), the evidence items linked to those relationships
         or referencing the resource directly, and all coverage records.
         Returns ``None`` when the resource has never been stored.
+
+        When ``resolver`` is given, the subject is resolved through compatible
+        identities first, so a less-qualified reference (an accountless S3
+        bucket ARN) reaches the stored, account-qualified resource and the
+        edges that point at it.
         """
-        resource = self.resources.get(canonical_id)
+        if resolver is not None:
+            resolved = _resolve_stored(resolver, canonical_id)
+            if resolved is None:
+                return None
+            canonical_id = resolved
+            resource = self.resources.get(canonical_id)
+            outgoing = resolver.outgoing(canonical_id)
+            incoming = resolver.incoming(canonical_id)
+        else:
+            resource = self.resources.get(canonical_id)
+            outgoing = self.relationships.outgoing(canonical_id)
+            incoming = self.relationships.incoming(canonical_id)
         if resource is None:
             return None
-        outgoing = self.relationships.outgoing(canonical_id)
-        incoming = self.relationships.incoming(canonical_id)
         linked: list[str] = []
         for relationship in (*outgoing, *incoming):
             linked.extend(relationship.evidence_ids)

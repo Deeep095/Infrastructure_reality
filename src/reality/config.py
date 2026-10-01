@@ -52,17 +52,45 @@ class RealityConfig(BaseModel):
         """True only when the complete explicit opt-in triple is present."""
         return self.aws_opt_in and self.aws_profile is not None and self.aws_region is not None
 
-    def validate_aws_flags(self) -> None:
-        """Reject partial AWS selection on any command.
+    def validate_aws_flags(
+        self, *, flag_profile: str | None = None, flag_region: str | None = None
+    ) -> None:
+        """Reject a partial AWS selection typed on the command line.
 
         ``--profile`` or ``--region`` without ``--aws`` implies implicit AWS
         usage, which the safety contract forbids, so reject it loudly.
+
+        Only the *flags* are policed. A profile or region that came from the
+        settings file or the environment is a saved preference, not a request
+        to read AWS - erroring on those would make it impossible to keep a
+        region configured while running purely local commands, which is the
+        single most common way to use this tool. What matters is that nothing
+        reaches AWS without ``--aws``, and that is enforced by ``--aws`` never
+        being persisted.
         """
-        if not self.aws_opt_in and (self.aws_profile is not None or self.aws_region is not None):
+        if not self.aws_opt_in and (flag_profile is not None or flag_region is not None):
             raise ConfigError(
                 "--profile and --region only make sense together with --aws; "
                 "rerun with --aws --profile PROFILE --region REGION"
             )
+        # A complete triple must also be complete, however it was assembled. A
+        # command that reads no AWS still refuses `--aws` alone, so the opt-in
+        # means the same thing everywhere instead of being quietly ignored by
+        # some subcommands and enforced by others.
+        if self.aws_opt_in:
+            missing = [
+                flag
+                for flag, value in (
+                    ("--profile", self.aws_profile),
+                    ("--region", self.aws_region),
+                )
+                if value is None
+            ]
+            if missing:
+                raise ConfigError(
+                    f"--aws requires an explicit {' and '.join(missing)}; "
+                    "no default profile or region is ever assumed"
+                )
 
     def require_aws(self) -> None:
         """Validate the complete explicit opt-in triple before an AWS adapter runs.
