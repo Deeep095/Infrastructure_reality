@@ -1,8 +1,8 @@
 """A scan-scoped view over the stored graph.
 
 The store holds raw observations: resources, relationships, evidence, coverage,
-and the identity mappings a scan computed. Every consumer — reconciliation,
-``why``, ``impact``, ``simulate`` and the graph exporters — needs to answer the
+and the identity mappings a scan computed. Every consumer --- reconciliation,
+``why``, ``impact``, ``simulate`` and the graph exporters --- needs to answer the
 same questions about that data:
 
 * Does this canonical ID denote a resource we have stored?
@@ -15,13 +15,15 @@ unreachable: the scan stored it account-qualified, the edges that reference it
 were recorded accountless, and the traversal compared the two strings exactly.
 
 ``IdentityResolver`` is the first piece of that view. It resolves a canonical
-ID to every stored ID denoting the same concrete resource, and — crucially —
+ID to every stored ID denoting the same concrete resource, and --- crucially ---
 finds the edges that *point at* a resource even when the edge recorded less
 identity than the resource itself.
 """
 
 from __future__ import annotations
 
+import hashlib
+from collections import deque
 from collections.abc import Sequence
 
 from reality.domain.ids import (
@@ -40,12 +42,195 @@ from reality.domain.models import (
 from reality.storage.repositories import ScanStore
 
 
+def _sanitize_id(canonical_id: str) -> str:
+    """Map a canonical ID to a valid DOT/Mermaid node ID."""
+    return "n" + hashlib.md5(canonical_id.encode()).hexdigest()[:12]
+
+
+def _label_for(canonical_id: str, resource: Resource | None) -> str:
+    """Human-readable label for a node."""
+    if resource is None:
+        return canonical_id
+    parts = []
+    if resource.terraform_address:
+        parts.append(resource.terraform_address)
+    if resource.native_id:
+        parts.append(resource.native_id)
+    if resource.arn:
+        parts.append(resource.arn.split(":")[-1])
+    return " | ".join(parts) if parts else canonical_id
+
+
+def _conclusion_style(conclusion: str | None) -> dict[str, str]:
+    """DOT attributes for a conclusion."""
+    styles = {
+        "confirmed": {"color": "green", "style": "solid"},
+        "undocumented": {"color": "red", "style": "bold"},
+        "possible": {"color": "orange", "style": "dashed"},
+        "declared_only": {"color": "blue", "style": "dotted"},
+        "unknown": {"color": "gray", "style": "dotted"},
+    }
+    if conclusion is None:
+        return {"color": "black", "style": "solid"}
+    return styles.get(conclusion, {"color": "black", "style": "solid"})
+
+
+def _is_unresolved(canonical_id: str) -> bool:
+    """Check if a canonical ID is unresolved (truly unknown, not just missing account/region).
+
+    Terraform resources use ``-`` for unknown account/region (e.g. ``terraform/aws/.../-/-/...``),
+    which is a valid stored ID. Only ``unresolved/`` prefix indicates a truly unresolved reference.
+    """
+    return canonical_id.startswith("unresolved/")
+
+
+def _collect_subgraph(
+    view: GraphView,
+    root: str,
+    depth: int,
+    *,
+    direction: str = "incoming",
+    include_unresolved: bool = False,
+) -> tuple[dict[str, Resource | None], list[tuple[str, str, str | None]]]:
+    """Collect nodes and edges for a subgraph.
+
+    Returns (node_id -> resource, list of (source, target, conclusion)).
+    """
+    edge_conclusions = view.edge_conclusions()
+    node_resources: dict[str, Resource | None] = {}
+    edges: list[tuple[str, str, str | None]] = []
+    queue: deque[tuple[str, int]] = deque([(root, 0)])
+    visited: set[str] = set()
+
+    while queue:
+        node, d = queue.popleft()
+        if d > depth or node in visited:
+            continue
+        if not include_unresolved and _is_unresolved(node):
+            continue
+        visited.add(node)
+
+        resource = view.get_resource(node)
+        node_resources[node] = resource
+
+        # Follow the requested direction
+        related = view.incoming(node) if direction == "incoming" else view.outgoing(node)
+        for edge in related:
+            other = (
+                edge.source_canonical_id if direction == "incoming" else edge.target_canonical_id
+            )
+            if not include_unresolved and _is_unresolved(other):
+                continue
+            # Look up conclusion from reconciliation findings
+            key = (node, other) if direction == "incoming" else (other, node)
+            conclusion = edge_conclusions.get(key)
+            edges.append((node, other, conclusion))
+            if other not in visited and d < depth:
+                queue.append((other, d + 1))
+
+    return node_resources, edges
+
+
+class GraphExporter:
+    """Export a GraphView subgraph to DOT or Mermaid."""
+
+    def __init__(self, view: GraphView):
+        self.view = view
+
+    def export(
+        self,
+        root: str,
+        depth: int = 3,
+        *,
+        direction: str = "incoming",
+        include_unresolved: bool = False,
+        output_format: str = "dot",
+    ) -> str:
+        if output_format == "dot":
+            return self._export_dot(root, depth, direction, include_unresolved)
+        elif output_format == "mermaid":
+            return self._export_mermaid(root, depth, direction, include_unresolved)
+        else:
+            return self._export_text(root, depth, direction, include_unresolved)
+
+    def _export_text(self, root: str, depth: int, direction: str, include_unresolved: bool) -> str:
+        node_resources, edges = _collect_subgraph(
+            self.view, root, depth, direction=direction, include_unresolved=include_unresolved
+        )
+        lines = [f"Graph rooted at {root} (depth {depth}, direction={direction}):"]
+        for src, tgt, conclusion in edges:
+            label = f" [{conclusion}]" if conclusion else ""
+            lines.append(f"  {src} -> {tgt}{label}")
+        return "\n".join(lines)
+
+    def _export_dot(self, root: str, depth: int, direction: str, include_unresolved: bool) -> str:
+        node_resources, edges = _collect_subgraph(
+            self.view, root, depth, direction=direction, include_unresolved=include_unresolved
+        )
+        lines = ["digraph G {", "  rankdir=LR;", '  node [fontname="Helvetica"];']
+        id_map = {cid: _sanitize_id(cid) for cid in node_resources}
+
+        # Declare all nodes
+        for cid, resource in node_resources.items():
+            nid = id_map[cid]
+            label = _label_for(cid, resource)
+            lines.append(f'  {nid} [label="{label}"];')
+
+        # Edges with conclusion styling
+        for src, tgt, conclusion in edges:
+            if src not in id_map or tgt not in id_map:
+                continue
+            style = _conclusion_style(conclusion)
+            attrs = ", ".join(f'{k}="{v}"' for k, v in style.items())
+            lines.append(f"  {id_map[src]} -> {id_map[tgt]} [{attrs}];")
+
+        lines.append("}")
+        return "\n".join(lines)
+
+    def _export_mermaid(
+        self, root: str, depth: int, direction: str, include_unresolved: bool
+    ) -> str:
+        node_resources, edges = _collect_subgraph(
+            self.view, root, depth, direction=direction, include_unresolved=include_unresolved
+        )
+        lines = ["graph TD"]
+        id_map = {cid: _sanitize_id(cid) for cid in node_resources}
+
+        # Declare all nodes with labels
+        for cid, resource in node_resources.items():
+            nid = id_map[cid]
+            label = _label_for(cid, resource).replace('"', "#quot;")
+            lines.append(f'  {nid}["{label}"]')
+
+        # Edges with clickable styling via classDef
+        class_defs: set[str] = set()
+        for src, tgt, conclusion in edges:
+            if src not in id_map or tgt not in id_map:
+                continue
+            if conclusion:
+                class_name = f"class_{conclusion}"
+                class_defs.add(class_name)
+                lines.append(f"  {id_map[src]} -->|{conclusion}| {id_map[tgt]}")
+                lines.append(f"  class {id_map[src]},{id_map[tgt]} {class_name}")
+            else:
+                lines.append(f"  {id_map[src]} --> {id_map[tgt]}")
+
+        # Class definitions for styling
+        for class_name in sorted(class_defs):
+            conclusion = class_name.replace("class_", "")
+            style = _conclusion_style(conclusion)
+            color = style["color"]
+            lines.append(f"  classDef {class_name} fill:{color},color:{color},stroke-width:2px;")
+
+        return "\n".join(lines)
+
+
 class IdentityResolver:
     """Resolve canonical IDs and edges across compatible identities.
 
     The resolver indexes stored resources by their base identity
     (provider, service, type, resource ID) so a lookup only compares candidates
-    that could possibly match — an accountless S3 bucket ARN is checked against
+    that could possibly match --- an accountless S3 bucket ARN is checked against
     the buckets we hold, not against every resource in the store. Edges are
     indexed the same way, so a traversal can find every edge that points at a
     resource regardless of how much identity the edge recorded.
@@ -82,7 +267,7 @@ class IdentityResolver:
         """Stored resource IDs that denote the same resource as ``canonical_id``.
 
         Always includes ``canonical_id`` itself when it is stored verbatim. An
-        unparseable or unresolved reference resolves only to itself — a pattern
+        unparseable or unresolved reference resolves only to itself --- a pattern
         is never silently promoted to a concrete resource.
         """
         try:
@@ -136,8 +321,8 @@ class IdentityResolver:
 class GraphView:
     """A scan-scoped view over the stored graph.
 
-    Every consumer — reconciliation, ``why``, ``impact``, ``simulate`` and the
-    graph exporters — needs to answer the same questions about *one* scan run:
+    Every consumer --- reconciliation, ``why``, ``impact``, ``simulate`` and the
+    graph exporters --- needs to answer the same questions about *one* scan run:
 
     * Does this canonical ID denote a resource stored **in that scan**?
     * Which stored IDs are the *same* real-world thing, recorded with more or
@@ -149,9 +334,11 @@ class GraphView:
         self,
         store: ScanStore,
         scan_run_id: int,
+        findings_scan_run_id: int | None = None,
     ) -> None:
         self._store = store
         self._scan_run_id = scan_run_id
+        self._findings_scan_run_id = findings_scan_run_id
         self._resolver = IdentityResolver(
             store.resources.for_scan_run(scan_run_id),
             store.relationships.for_scan_run(scan_run_id),
@@ -209,6 +396,27 @@ class GraphView:
     def findings(self) -> tuple[Finding, ...]:
         return self._store.findings.for_scan_run(self._scan_run_id)
 
+    def edge_conclusions(self) -> dict[tuple[str, str], str]:
+        """Return a mapping of (source_canonical_id, target_canonical_id) -> conclusion.
+
+        Parses the finding IDs from reconciliation findings, which are of the form:
+        "reconcile:{relationship_type}:{source}:{target}"
+
+        Uses the findings scan run ID if provided, otherwise falls back to the
+        graph's scan run ID.
+        """
+        findings_run_id = self._findings_scan_run_id or self._scan_run_id
+        conclusions: dict[tuple[str, str], str] = {}
+        for finding in self._store.findings.for_scan_run(findings_run_id):
+            # finding.id format: "reconcile:{rel_type}:{source}:{target}"
+            parts = finding.id.split(":", 3)
+            if len(parts) == 4 and parts[0] == "reconcile":
+                _, _, source, target = parts
+                key = (source, target)
+                if key not in conclusions:
+                    conclusions[key] = finding.conclusion.value
+        return conclusions
+
     # --- identity mappings ----------------------------------------------------
 
     def identity_mappings(self) -> tuple[IdentityMapping, ...]:
@@ -235,62 +443,26 @@ class GraphView:
 
     # --- graph export ---------------------------------------------------------
 
-    def export_graph(self, root: str, depth: int = 3, output_format: str = "text") -> str:
+    def export_graph(
+        self,
+        root: str,
+        depth: int = 3,
+        *,
+        direction: str = "incoming",
+        include_unresolved: bool = False,
+        output_format: str = "dot",
+    ) -> str:
         """Export a subgraph starting at root, up to depth.
 
         output_format: "text" | "dot" | "mermaid"
+        direction: "incoming" (dependents/blast radius) or "outgoing" (dependencies)
+        include_unresolved: whether to include unresolved/-/-/- nodes
         """
-        if output_format == "dot":
-            return self._export_dot(root, depth)
-        elif output_format == "mermaid":
-            return self._export_mermaid(root, depth)
-        else:
-            return self._export_text(root, depth)
-
-    def _export_text(self, root: str, depth: int) -> str:
-        lines = [f"Graph rooted at {root} (depth {depth}):"]
-        queue: list[tuple[str, int]] = [(root, 0)]
-        visited: set[str] = set()
-        while queue:
-            node, d = queue.pop(0)
-            if d > depth or node in visited:
-                continue
-            visited.add(node)
-            lines.append(f"  {'  ' * d}{node}")
-            for edge in self.outgoing(node):
-                queue.append((edge.target_canonical_id, d + 1))
-        return "\n".join(lines)
-
-    def _export_dot(self, root: str, depth: int) -> str:
-        lines = ["digraph G {"]
-        queue: list[tuple[str, int]] = [(root, 0)]
-        visited: set[str] = set()
-        while queue:
-            node, d = queue.pop(0)
-            if d > depth or node in visited:
-                continue
-            visited.add(node)
-            for edge in self.outgoing(node):
-                target = edge.target_canonical_id
-                lines.append(f'  "{node}" -> "{target}";')
-                if d < depth and target not in visited:
-                    queue.append((target, d + 1))
-        lines.append("}")
-        return "\n".join(lines)
-
-    def _export_mermaid(self, root: str, depth: int) -> str:
-        lines = ["```mermaid", "graph TD"]
-        queue: list[tuple[str, int]] = [(root, 0)]
-        visited: set[str] = set()
-        while queue:
-            node, d = queue.pop(0)
-            if d > depth or node in visited:
-                continue
-            visited.add(node)
-            for edge in self.outgoing(node):
-                target = edge.target_canonical_id
-                lines.append(f"  {node} --> {target}")
-                if d < depth and target not in visited:
-                    queue.append((target, d + 1))
-        lines.append("```")
-        return "\n".join(lines)
+        exporter = GraphExporter(self)
+        return exporter.export(
+            root,
+            depth,
+            direction=direction,
+            include_unresolved=include_unresolved,
+            output_format=output_format,
+        )

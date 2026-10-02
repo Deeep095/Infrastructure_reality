@@ -136,7 +136,7 @@ class ScanRunRepository:
         return int(self._conn.execute("SELECT COUNT(*) FROM scan_runs").fetchone()[0])
 
     def latest_discovery_run(self) -> int | None:
-        """The most recent scan run that collected evidence — not a
+        """The most recent scan run that collected evidence - not a
         reconciliation pass.
 
         The snapshot boundary for analysis: everything a reconciliation pass
@@ -146,6 +146,19 @@ class ScanRunRepository:
         """
         row = self._conn.execute(
             "SELECT id FROM scan_runs WHERE source != ? ORDER BY id DESC LIMIT 1",
+            (EvidenceSource.RECONCILIATION.value,),
+        ).fetchone()
+        return int(row["id"]) if row is not None else None
+
+    def latest_reconciliation_run(self) -> int | None:
+        """The most recent reconciliation pass.
+
+        Reconciliation passes store their findings in their own scan run, so
+        to access the latest conclusions we need the reconciliation run, not
+        the discovery run it analysed.
+        """
+        row = self._conn.execute(
+            "SELECT id FROM scan_runs WHERE source = ? ORDER BY id DESC LIMIT 1",
             (EvidenceSource.RECONCILIATION.value,),
         ).fetchone()
         return int(row["id"]) if row is not None else None

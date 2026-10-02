@@ -69,3 +69,4 @@ scripts/openrouter-mcp.mjs
 # Operating-system files
 .DS_Store
 Thumbs.db
+debug_*.py

@@ -32,6 +32,7 @@ from reality.config import ConfigError, RealityConfig
 from reality.domain.ids import parse_canonical
 from reality.domain.models import Resource
 from reality.services.doctor import render_doctor, run_doctor
+from reality.services.graph import GraphView
 from reality.services.impact import (
     DEFAULT_DEPTH,
     Assessment,
@@ -348,6 +349,36 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
 
+    graph = sub.add_parser(
+        "graph",
+        help="export a subgraph of the stored relationships as DOT, Mermaid, or text",
+    )
+    _add_common_flags(graph, global_defaults=False)
+    graph.add_argument("resource", help="canonical ID, Terraform address, ARN, or native ID")
+    graph.add_argument(
+        "--depth",
+        type=_positive_int,
+        default=DEFAULT_DEPTH,
+        help="maximum traversal depth (default: %(default)s)",
+    )
+    graph.add_argument(
+        "--output",
+        choices=("text", "dot", "mermaid"),
+        default="dot",
+        help="output format (default: %(default)s)",
+    )
+    graph.add_argument(
+        "--direction",
+        choices=("incoming", "outgoing"),
+        default="incoming",
+        help="traverse incoming edges (dependents/blast radius) or outgoing (dependencies)",
+    )
+    graph.add_argument(
+        "--include-unresolved",
+        action="store_true",
+        help="include unresolved/-/-/- nodes in the export",
+    )
+
     simulate = sub.add_parser(
         "simulate",
         help="compute blast radius from an exported Terraform plan JSON (never applies it)",
@@ -559,6 +590,8 @@ def _dispatch(
         _run_why(config, args)
     elif command == "impact":
         return _run_impact(config, args)
+    elif command == "graph":
+        return _run_graph(config, args)
     elif command == "simulate":
         return _run_simulate(config, args)
     return EXIT_OK
@@ -809,6 +842,29 @@ def _run_impact(config: RealityConfig, args: argparse.Namespace) -> int:
     if rendered != EXIT_OK:
         return rendered
     return _fail_on(report.risk, args.fail_on)
+
+
+def _run_graph(config: RealityConfig, args: argparse.Namespace) -> int:
+    """Export a subgraph as DOT, Mermaid, or text."""
+    with _read_store(config) as store:
+        discovery_run_id = store.scan_runs.latest_discovery_run()
+        if discovery_run_id is None:
+            raise ScanInputError("no discovery scan runs found; run 'reality scan' first")
+        # Findings are stored in the reconciliation scan run, not the discovery run.
+        reconciliation_run_id = store.scan_runs.latest_reconciliation_run()
+        view = GraphView(store, discovery_run_id, findings_scan_run_id=reconciliation_run_id)
+        resolved = view.resolve_subject(args.resource)
+        if resolved is None:
+            raise ScanInputError(f"resource not found: {args.resource}")
+        output = view.export_graph(
+            resolved,
+            depth=args.depth,
+            direction=args.direction,
+            include_unresolved=args.include_unresolved,
+            output_format=args.output,
+        )
+    print(output)
+    return EXIT_OK
 
 
 def _run_simulate(config: RealityConfig, args: argparse.Namespace) -> int:
