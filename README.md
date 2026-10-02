@@ -303,10 +303,11 @@ broken. It exits `1` if any check fails.
 | Command | What it does |
 |---|---|
 | `reality scan [TFJSON …]` | Parse local `terraform show -json` state/plan exports into the database; with the AWS opt-in triple, also discover live resources (EC2, Lambda, RDS, S3, security groups), IAM role permissions, and CloudTrail usage |
-| `reality reconcile [--scan-run N] [--verbose] [--output FORMAT]` | Compare the declared and observed worlds and store a conclusion per relationship candidate: `confirmed`, `undocumented`, `possible`, `declared_only`, or `unknown` with the missing coverage named. Idempotent — re-running replaces the same rows |
+| `reality reconcile [--scan-run N] [--verbose] [--fail-on LEVEL] [--conclusion LEVEL] [--output FORMAT]` | Compare the declared and observed worlds and store a conclusion per relationship candidate: `confirmed`, `undocumented`, `possible`, `declared_only`, or `unknown` with the missing coverage named. Idempotent — re-running replaces the same rows |
 | `reality why RESOURCE` | Show one resource with its relationships, evidence, findings, and coverage limitations |
 | `reality impact RESOURCE [--depth N] [--fail-on LEVEL] [--json]` | Reverse-traverse stored relationships to report the blast radius of a resource |
 | `reality simulate PLAN_JSON [--depth N] [--fail-on LEVEL] [--json]` | Select the delete/replace targets of an exported plan and report each one's blast radius; the plan is parsed, never applied |
+| `reality graph RESOURCE [--depth N] [--direction incoming\|outgoing] [--output text\|dot\|mermaid] [--include-unresolved]` | Export a subgraph as Mermaid, DOT, or text. Default direction is `incoming` (dependents/blast radius) |
 | `reality config [show \| path \| init]` | Show effective settings with their source, print the settings-file path, or write one |
 | `reality doctor [--aws …]` | Report on the environment; optionally verify AWS credentials when explicitly opted in |
 
@@ -373,6 +374,55 @@ The database is written in one transaction at the end, so `Ctrl-C` (or a
 cancelling progress reporter) leaves it exactly as it was: no partial run, no
 half-written rows. The scan exits `130` instead of `0`, so a pipeline can tell
 an interrupted run from a completed one.
+
+### Graph export
+
+`reality graph` exports a subgraph for documentation or review. Mermaid renders
+natively in GitHub Markdown, VS Code (with the Mermaid extension), Obsidian, and
+Notion:
+
+```bash
+# Blast radius (who depends on this resource) — default direction
+reality --database demo.db graph aws_security_group.web_sg --output mermaid
+
+# Dependencies (what this resource depends on)
+reality --database demo.db graph aws_instance.web --direction outgoing --output mermaid
+
+# Include unresolved pattern targets (e.g. IAM permissions to *)
+reality --database demo.db graph aws_instance.web --include-unresolved --output mermaid
+```
+
+Output (paste into any Mermaid renderer):
+
+```mermaid
+graph TD
+  n460c5035b8a5["aws_instance.web | i-0web | instance/i-0web"]
+  n04cf9787fa3a["aws/iam/instance-profile/-/123456789012/web-profile"]
+  nd1bde80ce284["aws_security_group.web_sg | sg-0aaa111 | security-group/sg-0aaa111"]
+  n460c5035b8a5 --> n04cf9787fa3a
+  n460c5035b8a5 --> nd1bde80ce284
+```
+
+Edges are styled by conclusion: green = confirmed, red = undocumented,
+orange = possible, blue = declared_only, gray = unknown.
+
+### CI gate example
+
+`reconcile --fail-on` turns drift detection into a pipeline verdict:
+
+```bash
+# Fail the build if any undocumented dependencies exist
+reality --database demo.db reconcile --fail-on undocumented || exit 1
+
+# Show only undocumented findings
+reality --database demo.db reconcile --conclusion undocumented
+
+# Fail if any high-risk blast radius exists
+reality --database demo.db impact aws_security_group.web_sg --fail-on high || exit 1
+```
+
+`--fail-on` for reconcile uses conclusion severity order:
+`confirmed < undocumented < possible < declared_only < unknown`.
 
 ## Where to read more
 
