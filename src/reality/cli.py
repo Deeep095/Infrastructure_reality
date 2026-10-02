@@ -916,6 +916,22 @@ def _render_output(
     if getattr(args, "json", False):
         output_format = OutputFormat.JSON
 
+    # Auto-select table format when rich is installed and stdout is a TTY.
+    # This gives users a nicer default without forcing a flag, while keeping
+    # piped/CI output as raw text.
+    if output_format == OutputFormat.TEXT:
+        try:
+            import shutil
+
+            from rich.console import Console
+        except ImportError:
+            pass
+        else:
+            if shutil.get_terminal_size().columns > 80:
+                console = Console()
+                if console.is_terminal:
+                    output_format = OutputFormat.TABLE
+
     try:
         if output_format == OutputFormat.JSON:
             print(stable_json(report))

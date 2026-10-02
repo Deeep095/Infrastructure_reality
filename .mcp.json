@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "openrouter": {
+      "command": "node",
+      "args": ["scripts/openrouter-mcp.mjs"],
+      "env": {
+        "OPENROUTER_API_KEY": "${OPENROUTER_API_KEY}"
+      }
+    }
+  }
+}

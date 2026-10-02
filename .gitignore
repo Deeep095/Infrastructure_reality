@@ -1,72 +1,20 @@
-# Python bytecode and caches
-__pycache__/
-*.py[cod]
-*$py.class
-*.so
-.Python
-
-# Virtual environments
-.venv/
-venv/
-env/
-ENV/
-
-# Build and package outputs
-build/
-dist/
-.eggs/
-*.egg-info/
-
-# Test, lint, type-check, and coverage outputs
-.pytest_cache/
-.ruff_cache/
-.mypy_cache/
-.coverage
-coverage.xml
-htmlcov/
-
-# Local environment and secrets
-.env
-.env.*
-!.env.example
-*.pem
-*.key
-
-# Local databases and SQLite sidecar files
-*.db
-*.db-shm
-*.db-wal
-*.sqlite
-*.sqlite3
-*.sqlite-shm
-*.sqlite-wal
-
-# Terraform local state and crash artifacts
-.terraform/
-*.tfstate
-*.tfstate.*
-crash.log
-
-# Local scratch folders and downloaded provider binaries (never commit these)
-ManualTests/complex/
-Atest/
-mystate.json
-
-# Logs and temporary files
-*.log
-*.tmp
-*.bak
-*.swp
-
-# Editor and assistant-local configuration
-.claude/
-.vscode/
-.mcp.json
-
-# OpenRouter coding-assistant bridge (not part of reality)
-scripts/openrouter-mcp.mjs
-
-# Operating-system files
-.DS_Store
-Thumbs.db
+# Debug/temp files
 debug_*.py
+debug_*.tmp
+
+# Database files
+*.db
+!tests/fixtures/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+Thumbs.db
+.DS_Store
