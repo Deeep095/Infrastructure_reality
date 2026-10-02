@@ -18,3 +18,18 @@ __pycache__/
 # OS
 Thumbs.db
 .DS_Store
+
+# Terraform
+.terraform/
+.terraform.lock.hcl
+*.tfstate
+*.plan
+*.tfplan
+plan.json
+reality-plan.json
+reality-state.json
+
+# Random files
+.mcp.json
+scripts/
+mystate.json
