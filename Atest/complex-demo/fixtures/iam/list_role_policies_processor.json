@@ -1,0 +1,8 @@
+{
+  "pages": [
+    {
+      "PolicyNames": ["processor-inline-policy"],
+      "IsTruncated": false
+    }
+  ]
+}

@@ -1,0 +1,37 @@
+{
+  "RoleName": "lambda-processor-role",
+  "PolicyName": "processor-inline-policy",
+  "PolicyDocument": {
+    "Version": "2012-10-17",
+    "Statement": [
+      {
+        "Sid": "AllowS3",
+        "Effect": "Allow",
+        "Action": ["s3:*"],
+        "Resource": [
+          "arn:aws:s3:::acme-data-bucket",
+          "arn:aws:s3:::acme-dummy-01",
+          "arn:aws:s3:::acme-dummy-02",
+          "arn:aws:s3:::acme-dummy-03",
+          "arn:aws:s3:::acme-dummy-04",
+          "arn:aws:s3:::acme-dummy-05",
+          "arn:aws:s3:::acme-dummy-06",
+          "arn:aws:s3:::acme-dummy-07",
+          "arn:aws:s3:::acme-dummy-08",
+          "arn:aws:s3:::acme-dummy-09",
+          "arn:aws:s3:::acme-dummy-10",
+          "arn:aws:s3:::acme-dummy-11",
+          "arn:aws:s3:::acme-dummy-12",
+          "arn:aws:s3:::acme-dummy-13",
+          "arn:aws:s3:::acme-dummy-14",
+          "arn:aws:s3:::acme-dummy-15",
+          "arn:aws:s3:::acme-dummy-16",
+          "arn:aws:s3:::acme-dummy-17",
+          "arn:aws:s3:::acme-dummy-18",
+          "arn:aws:s3:::acme-dummy-19",
+          "arn:aws:s3:::acme-dummy-20"
+        ]
+      }
+    ]
+  }
+}

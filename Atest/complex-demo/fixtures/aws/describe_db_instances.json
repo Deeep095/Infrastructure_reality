@@ -1,0 +1,17 @@
+{
+  "pages": [
+    {
+      "DBInstances": [
+        {
+          "DBInstanceIdentifier": "primary-db",
+          "DBInstanceArn": "arn:aws:rds:us-east-1:111222333444:db:primary-db",
+          "VpcSecurityGroups": [
+            {
+              "VpcSecurityGroupId": "sg-0db222"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

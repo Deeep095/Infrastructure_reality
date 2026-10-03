@@ -1,0 +1,23 @@
+{
+  "pages": [
+    {
+      "SecurityGroups": [
+        {
+          "GroupId": "sg-0web111",
+          "GroupName": "web-sg",
+          "Description": "web-sg"
+        },
+        {
+          "GroupId": "sg-0db222",
+          "GroupName": "db-sg",
+          "Description": "db-sg"
+        },
+        {
+          "GroupId": "sg-0mystery555",
+          "GroupName": "mystery-sg",
+          "Description": "mystery-sg"
+        }
+      ]
+    }
+  ]
+}

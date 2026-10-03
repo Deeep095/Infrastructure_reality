@@ -5,6 +5,8 @@ debug_*.tmp
 # Database files
 *.db
 !tests/fixtures/
+Atest/*.db
+Atest/complex-demo/*.db
 
 # Python
 __pycache__/
@@ -28,8 +30,3 @@ Thumbs.db
 plan.json
 reality-plan.json
 reality-state.json
-
-# Random files
-.mcp.json
-scripts/
-mystate.json

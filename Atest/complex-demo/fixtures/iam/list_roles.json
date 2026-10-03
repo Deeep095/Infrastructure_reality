@@ -1,0 +1,15 @@
+{
+  "pages": [
+    {
+      "Roles": [
+        {
+          "Path": "/",
+          "RoleName": "lambda-processor-role",
+          "Arn": "arn:aws:iam::111222333444:role/lambda-processor-role",
+          "CreateDate": "2026-01-05T10:00:00Z"
+        }
+      ],
+      "IsTruncated": false
+    }
+  ]
+}

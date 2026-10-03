@@ -1,0 +1,10 @@
+{
+  "scan_run_id": 2,
+  "counts": {
+    "confirmed": 6,
+    "undocumented": 1,
+    "possible": 21,
+    "declared_only": 4,
+    "unknown": 0
+  }
+}

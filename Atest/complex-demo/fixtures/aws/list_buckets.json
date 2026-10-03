@@ -1,0 +1,29 @@
+{
+  "Owner": {"DisplayName": "sandbox", "ID": "a1b2"},
+  "Buckets": [
+    {
+      "Name": "acme-data-bucket",
+      "CreationDate": "2025-01-15T10:30:00+00:00"
+    },
+    { "Name": "acme-dummy-01", "CreationDate": "2025-01-01T00:00:00Z" },
+    { "Name": "acme-dummy-02", "CreationDate": "2025-01-01T00:00:00Z" },
+    { "Name": "acme-dummy-03", "CreationDate": "2025-01-01T00:00:00Z" },
+    { "Name": "acme-dummy-04", "CreationDate": "2025-01-01T00:00:00Z" },
+    { "Name": "acme-dummy-05", "CreationDate": "2025-01-01T00:00:00Z" },
+    { "Name": "acme-dummy-06", "CreationDate": "2025-01-01T00:00:00Z" },
+    { "Name": "acme-dummy-07", "CreationDate": "2025-01-01T00:00:00Z" },
+    { "Name": "acme-dummy-08", "CreationDate": "2025-01-01T00:00:00Z" },
+    { "Name": "acme-dummy-09", "CreationDate": "2025-01-01T00:00:00Z" },
+    { "Name": "acme-dummy-10", "CreationDate": "2025-01-01T00:00:00Z" },
+    { "Name": "acme-dummy-11", "CreationDate": "2025-01-01T00:00:00Z" },
+    { "Name": "acme-dummy-12", "CreationDate": "2025-01-01T00:00:00Z" },
+    { "Name": "acme-dummy-13", "CreationDate": "2025-01-01T00:00:00Z" },
+    { "Name": "acme-dummy-14", "CreationDate": "2025-01-01T00:00:00Z" },
+    { "Name": "acme-dummy-15", "CreationDate": "2025-01-01T00:00:00Z" },
+    { "Name": "acme-dummy-16", "CreationDate": "2025-01-01T00:00:00Z" },
+    { "Name": "acme-dummy-17", "CreationDate": "2025-01-01T00:00:00Z" },
+    { "Name": "acme-dummy-18", "CreationDate": "2025-01-01T00:00:00Z" },
+    { "Name": "acme-dummy-19", "CreationDate": "2025-01-01T00:00:00Z" },
+    { "Name": "acme-dummy-20", "CreationDate": "2025-01-01T00:00:00Z" }
+  ]
+}

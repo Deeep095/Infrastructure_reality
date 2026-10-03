@@ -28,6 +28,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import cast
 
+from reality import __version__
 from reality.config import ConfigError, RealityConfig
 from reality.domain.ids import parse_canonical
 from reality.domain.models import Resource
@@ -205,6 +206,12 @@ def build_parser() -> argparse.ArgumentParser:
             "Read-only cloud infrastructure discovery and local blast-radius "
             "simulation. Never applies, destroys, or refreshes infrastructure."
         ),
+    )
+    parser.add_argument(
+        "--version",
+        action="version",
+        version=f"reality {__version__}",
+        help="print the installed version and exit",
     )
     _add_common_flags(parser, global_defaults=True)
 

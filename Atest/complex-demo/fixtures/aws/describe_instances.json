@@ -1,0 +1,26 @@
+{
+  "pages": [
+    {
+      "Reservations": [
+        {
+          "ReservationId": "r-0aaaa111",
+          "OwnerId": "111222333444",
+          "Instances": [
+            {
+              "InstanceId": "i-0web333",
+              "InstanceType": "t3.medium",
+              "InstanceState": {"Name": "running"},
+              "SecurityGroups": [
+                {"GroupId": "sg-0web111", "GroupName": "web-sg"},
+                {"GroupId": "sg-0mystery555", "GroupName": "mystery-sg"}
+              ],
+              "Tags": [
+                {"Key": "Name", "Value": "web-server"}
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
