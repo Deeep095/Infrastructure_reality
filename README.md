@@ -432,6 +432,7 @@ reality --database demo.db impact aws_security_group.web_sg --fail-on high || ex
   evidence scope, canonical-ID rules, coverage and reconciliation semantics,
   blast-radius traversal and risk bands, storage layout, and the known
   limitations of the IAM and CloudTrail sources.
+- [AWS_DATA_COLLECTION_EXPLAINED.md](AWS_DATA_COLLECTION_EXPLAINED.md) — details on exactly how the project collects data from AWS, CloudTrail, and IAM using the adapter pattern.
 
 ## Development
 
