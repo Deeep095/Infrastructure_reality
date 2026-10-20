@@ -3,7 +3,7 @@
 from importlib.metadata import PackageNotFoundError, version
 
 try:
-    __version__ = version("reality")
+    __version__ = version("reality-infrastructure")
 except PackageNotFoundError:
     # Running from a source checkout that was never pip-installed. The version
     # is cosmetic everywhere it is used, so report it as unknown rather than
