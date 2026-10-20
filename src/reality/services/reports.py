@@ -19,10 +19,19 @@ from typing import TYPE_CHECKING, Any
 from pydantic import BaseModel, ConfigDict
 
 from reality.domain.enums import Conclusion, CoverageStatus, EvidenceSource
-from reality.domain.ids import parse_canonical
+from reality.domain.ids import IdParseError, parse_canonical
 from reality.domain.models import Coverage, Finding, Relationship, Resource
 from reality.services.graph import IdentityResolver
-from reality.services.impact import Dependent, ImpactReport, SimulateReport
+from reality.services.hidden_dependencies import ConfidenceBand, HiddenDependency
+from reality.services.impact import (
+    VERDICT_GLOSS,
+    Dependent,
+    DependentCounts,
+    DependentKind,
+    ImpactReport,
+    SimulateReport,
+    Verdict,
+)
 from reality.services.reconcile import ReconciledRelationship, ReconcileReport
 from reality.storage.repositories import EvidenceRecord, ScanStore
 
@@ -43,7 +52,7 @@ DISCOVERY_SOURCES: tuple[EvidenceSource, ...] = (
 #: Message shown when ``--output table`` is asked for without rich installed.
 TABLE_EXTRA_HINT = (
     "the 'table' output format needs the optional 'rich' package; "
-    "install it with: pip install 'Infrastructure_reality[table]' "
+    "install it with: pip install 'reality[table]' "
     "(or use --output text/json/yaml/csv, which have no extra dependency)"
 )
 
@@ -254,9 +263,162 @@ def _missing_coverage(report: ReconcileReport) -> list[str]:
     return [f"{source.value} ({count})" for source, count in ordered]
 
 
+# --- the declared-vs-observed comparison ------------------------------------------
+
+#: Column width cap for the comparison view: wide enough for a Terraform
+#: address or an AWS native ID, narrow enough that three columns still fit an
+#: 80-column terminal.
+_COMPARE_WIDTH = 28
+
+
+def _truncate(text: str, width: int) -> str:
+    """Shorten to ``width``, keeping the tail.
+
+    The tail is the informative end of both forms this column holds: the name
+    in a Terraform address (``…security_group.web_sg``) and the resource in an
+    ARN. Cutting from the front leaves ``aws_security_gro...``, which is the
+    half every row has in common.
+    """
+    return text if len(text) <= width else "..." + text[-(width - 3) :]
+
+
+def _compare_label(canonical_id: str) -> str:
+    """The shortest identifier a human recognizes a resource by.
+
+    The Terraform address for the declared world, the native ID or name for
+    the observed one. Deliberately lossy — two resources of different types can
+    share a name — so this form is only ever used for display and the full
+    canonical IDs stay available under ``--verbose``.
+    """
+    try:
+        return parse_canonical(canonical_id).resource_id
+    except IdParseError:
+        return canonical_id
+
+
+#: What an empty DECLARED column means, per conclusion. Only for UNDOCUMENTED
+#: is the absence itself the finding; a permission grant has no Terraform
+#: counterpart to be missing, so saying "nothing declares it" there would read
+#: as drift that was never claimed.
+_NO_DECLARATION: dict[Conclusion, str] = {
+    Conclusion.UNDOCUMENTED: "nothing declares it",
+    Conclusion.POSSIBLE: "n/a - iam grant",
+}
+
+
+def _comparison_rows(report: ReconcileReport) -> list[ReconciledRelationship]:
+    """One row per real dependency, drift first.
+
+    A joined group emits a finding per namespace, so findings are collapsed on
+    :attr:`ReconciledRelationship.comparison_key` — otherwise a confirmed
+    dependency would appear twice, once from each world's point of view.
+    """
+    by_key: dict[tuple[str, str, str], ReconciledRelationship] = {}
+    for item in report.findings:
+        by_key.setdefault(item.comparison_key, item)
+    ordered: list[ReconciledRelationship] = []
+    for conclusion in CONCLUSION_ORDER:
+        rows = [item for item in by_key.values() if item.conclusion is conclusion]
+        rows.sort(key=lambda item: (item.source_canonical_id, item.target_canonical_id))
+        ordered.extend(rows)
+    return ordered
+
+
+#: Shown wherever finding counts sit next to the collapsed comparison rows, so
+#: "confirmed 6" beside three confirmed rows reads as bookkeeping, not a bug.
+_PER_SIDE_NOTE = "a dependency both worlds agree on is one row but one finding per side"
+
+
+def _row_counts(report: ReconcileReport) -> dict[Conclusion, int]:
+    """Per-conclusion counts of the comparison rows, not the stored findings."""
+    counts: dict[Conclusion, int] = {}
+    for item in _comparison_rows(report):
+        counts[item.conclusion] = counts.get(item.conclusion, 0) + 1
+    return counts
+
+
+def _compare_cells(item: ReconciledRelationship, width: int) -> tuple[str, str, str, str, str, str]:
+    """The six cells of one comparison row: declared, observed and verdict, x2 lines.
+
+    Truncation happens here rather than in the caller so the ``-> `` marker on
+    a target line survives it: eliding the whole cell would drop the arrow and
+    leave the second line looking like a wrapped continuation.
+    """
+
+    def target(canonical_id: str, room: int) -> str:
+        return f"-> {_truncate(_compare_label(canonical_id), room - 3)}"
+
+    if item.declared_edge is not None:
+        declared_head = _truncate(_compare_label(item.declared_edge[0]), width - 2)
+        declared_tail = target(item.declared_edge[1], width - 4)
+    else:
+        declared_head = "-"
+        declared_tail = _NO_DECLARATION.get(item.conclusion, "not declared")
+
+    if item.observed_edge is not None:
+        observed_head = _truncate(_compare_label(item.observed_edge[0]), width - 2)
+        observed_tail = target(item.observed_edge[1], width - 2)
+    else:
+        observed_head = "-"
+        observed_tail = "not observed"
+
+    verdict_head = (
+        item.conclusion.value.upper()
+        if item.conclusion is Conclusion.UNDOCUMENTED
+        else item.conclusion.value
+    )
+    verdict_tail = f"[{item.relationship_type.value}]"
+    if item.joined_by is not None:
+        verdict_tail += f" joined by {item.joined_by.value}"
+    return declared_head, declared_tail, observed_head, observed_tail, verdict_head, verdict_tail
+
+
+def render_comparison(report: ReconcileReport) -> list[str]:
+    """The declared-vs-observed comparison, as aligned plain-text lines.
+
+    This is the view the tool exists for: what Terraform declared, what AWS
+    reported, and the conclusion drawn from having both side by side. Drift
+    sorts to the top, because that is the row that changes what someone does
+    next.
+    """
+    rows = _comparison_rows(report)
+    if not rows:
+        return []
+    width = _COMPARE_WIDTH
+    lines = [
+        f"  {'DECLARED (terraform)':<{width}}{'OBSERVED (aws)':<{width}}VERDICT",
+        "  " + "-" * (width * 2 + 24),
+    ]
+    for item in rows:
+        d_head, d_tail, o_head, o_tail, v_head, v_tail = _compare_cells(item, width)
+        lines.append(f"  {d_head:<{width}}{o_head:<{width}}{v_head}")
+        lines.append(f"    {d_tail:<{width - 2}}{o_tail:<{width}}{v_tail}")
+        lines.append("")
+    return lines
+
+
+def _legend(report: ReconcileReport) -> list[str]:
+    """One line per conclusion actually present, so the table explains itself."""
+    present = [
+        conclusion
+        for conclusion in CONCLUSION_ORDER
+        if any(item.conclusion is conclusion for item in report.findings)
+    ]
+    if not present:
+        return []
+    width = max(len(conclusion.value) for conclusion in present)
+    return [
+        "  legend:",
+        *(
+            f"    {conclusion.value:<{width}}  {CONCLUSION_GLOSS[conclusion]}"
+            for conclusion in present
+        ),
+    ]
+
+
 def render_reconcile(report: ReconcileReport, *, verbose: bool = False) -> str:
     analysed = (
-        f"analysing scan run {report.analysed_scan_run_id}"
+        f"comparing scan run {report.analysed_scan_run_id}"
         if report.analysed_scan_run_id is not None
         else "no snapshot analysed"
     )
@@ -268,12 +430,22 @@ def render_reconcile(report: ReconcileReport, *, verbose: bool = False) -> str:
         lines.append("  none; the snapshot held no relationship candidates to compare")
         return "\n".join(lines) + "\n"
 
-    by_conclusion: dict[Conclusion, list[ReconciledRelationship]] = {}
-    for item in report.findings:
-        by_conclusion.setdefault(item.conclusion, []).append(item)
+    rows = len(_comparison_rows(report))
+    if not verbose and rows != len(report.findings):
+        lines.append(f"  shown below as {rows} dependencies; {_PER_SIDE_NOTE}")
+
+    drift = sum(1 for item in report.findings if item.conclusion is Conclusion.UNDOCUMENTED)
+    if drift:
+        lines.append(
+            f"  {drift} observed dependenc{'y' if drift == 1 else 'ies'} "
+            "no declaration accounts for"
+        )
+    lines.append("")
 
     if verbose:
-        # Full detailed output (original behavior)
+        by_conclusion: dict[Conclusion, list[ReconciledRelationship]] = {}
+        for item in report.findings:
+            by_conclusion.setdefault(item.conclusion, []).append(item)
         for conclusion in CONCLUSION_ORDER:
             items = by_conclusion.get(conclusion)
             if not items:
@@ -291,21 +463,9 @@ def render_reconcile(report: ReconcileReport, *, verbose: bool = False) -> str:
                     missing = ", ".join(source.value for source in item.unavailable_sources)
                     lines.append(f"        missing coverage: {missing}")
     else:
-        # Summary mode: counts, the actionable items, and what is missing.
-        for conclusion in CONCLUSION_ORDER:
-            items = by_conclusion.get(conclusion)
-            if not items:
-                continue
-            count = len(items)
-            lines.append(f"  {conclusion.value} ({count}) - {CONCLUSION_GLOSS[conclusion]}")
-            # For actionable conclusions, show first few items
-            if conclusion in (Conclusion.UNDOCUMENTED, Conclusion.POSSIBLE):
-                for item in items[:3]:
-                    source = _short_id(item.source_canonical_id)
-                    target = _short_id(item.target_canonical_id)
-                    lines.append(f"    - {source} -> {target} [{item.relationship_type.value}]")
-                if len(items) > 3:
-                    lines.append(f"    ... and {len(items) - 3} more")
+        lines.extend(render_comparison(report))
+        lines.extend(_legend(report))
+        lines.append("  full canonical IDs and per-finding reasoning: --verbose")
 
     missing_summary = _missing_coverage(report)
     if missing_summary:
@@ -317,15 +477,15 @@ def render_reconcile(report: ReconcileReport, *, verbose: bool = False) -> str:
 # --- rich table rendering ---------------------------------------------------------
 
 
-def _risk_style(risk_value: str) -> str:
-    """Return rich style for risk level."""
+def _verdict_style(verdict: str) -> str:
+    """Rich style for a blast-radius verdict."""
     styles = {
-        "high": "bold red",
-        "medium": "bold yellow",
-        "low": "bold green",
-        "unknown": "dim",
+        Verdict.UNDOCUMENTED_DEPENDENTS.value: "bold red",
+        Verdict.INCONCLUSIVE.value: "bold yellow",
+        Verdict.DEPENDENTS_DOCUMENTED.value: "cyan",
+        Verdict.NO_DEPENDENTS_FOUND.value: "bold green",
     }
-    return styles.get(risk_value.lower(), "")
+    return styles.get(verdict.lower(), "dim")
 
 
 def _strength_style(strength: str) -> str:
@@ -349,13 +509,19 @@ def _coverage_style(status: CoverageStatus) -> str:
 
 
 def _kind_style(kind: str) -> str:
-    """Return rich style for dependent kind."""
+    """Rich style for a dependent kind.
+
+    Keyed on the :class:`~reality.services.impact.DependentKind` values, which
+    say how well documented a dependency is — not on graph-distance words,
+    which is what this table used to colour by and never matched.
+    """
     styles = {
-        "direct": "cyan",
-        "transitive": "blue",
-        "unknown": "dim",
+        DependentKind.UNDOCUMENTED.value: "bold red",
+        DependentKind.UNKNOWN.value: "yellow",
+        DependentKind.POSSIBLE.value: "yellow",
+        DependentKind.DOCUMENTED.value: "green",
     }
-    return styles.get(kind.lower(), "")
+    return styles.get(kind.lower(), "dim")
 
 
 def _conclusion_style(conclusion: str) -> str:
@@ -393,7 +559,7 @@ CONCLUSION_GLOSS: dict[Conclusion, str] = {
 def render_why_table(report: WhyReport) -> None:
     Console, Table, Text = _rich()
     resource = report.resource
-    console = Console(force_terminal=True, legacy_windows=True, width=120)
+    console = Console()
 
     # Resource info table
     title = f"[bold cyan]reality: why {_short_id(resource.canonical_id)}[/bold cyan]"
@@ -478,7 +644,7 @@ def render_why_table(report: WhyReport) -> None:
 
         for finding in report.findings:
             conclusion_text = Text(
-                finding.conclusion.value, style=_risk_style(finding.conclusion.value)
+                finding.conclusion.value, style=_conclusion_style(finding.conclusion.value)
             )
             find_table.add_row(finding.id, conclusion_text, finding.explanation)
 
@@ -553,17 +719,14 @@ def _render_dependents_table(
 
 def render_impact_table(report: ImpactReport) -> None:
     Console, _, Text = _rich()
-    console = Console(force_terminal=True, legacy_windows=True, width=140)
+    console = Console()
 
-    # Header
-    risk_text = Text(report.risk.value.upper(), style=_risk_style(report.risk.value))
+    verdict_text = Text(report.verdict.value, style=_verdict_style(report.verdict.value))
     subject_short = _short_id(report.subject_canonical_id)
     console.print(f"[bold cyan]reality: impact of {subject_short}[/bold cyan]")
-    basis_line = (
-        f"  Basis: [bold]{report.basis.value}[/bold] | "
-        f"Depth: [bold]{report.depth}[/bold] | Risk: {risk_text}"
-    )
-    console.print(basis_line)
+    console.print(f"  Verdict:    {verdict_text}  [dim]{VERDICT_GLOSS[report.verdict]}[/dim]")
+    console.print(f"  Dependents: [bold]{report.counts.summary()}[/bold]")
+    console.print(f"  [dim]Basis: {report.basis.value} | Depth: {report.depth}[/dim]")
 
     _render_dependents_table(report.dependents, console, "  ")
 
@@ -575,33 +738,41 @@ def render_impact_table(report: ImpactReport) -> None:
 
 def render_simulate_table(report: SimulateReport) -> None:
     Console, _, Text = _rich()
-    console = Console(force_terminal=True, legacy_windows=True, width=140)
+    console = Console()
 
-    # Header
-    overall_risk_text = Text(
-        report.risk.value.upper() if report.risk is not None else "UNKNOWN",
-        style=_risk_style(report.risk.value) if report.risk is not None else "bold red",
+    overall = report.verdict.value if report.verdict is not None else "not_assessed"
+    overall_text = Text(overall, style=_verdict_style(overall))
+    gloss = (
+        VERDICT_GLOSS[report.verdict]
+        if report.verdict is not None
+        else "no target could be assessed"
     )
     console.print(f"[bold cyan]reality: simulate {report.plan_path}[/bold cyan]")
     console.print("  [dim]read-only; the plan is never applied[/dim]")
+    console.print(f"  Verdict:    {overall_text}  [dim]{gloss}[/dim]")
     console.print(f"  Assessment: {report.assessment.value}")
-    console.print(f"  Overall Risk: {overall_risk_text}")
-    console.print(f"  Targets: {len(report.targets)}")
+    console.print(f"  Dependents: {report.counts.summary()}")
+    console.print(f"  Targets:    {len(report.targets)}")
 
     if not report.targets:
-        console.print("[dim]  No targets in plan[/dim]")
+        console.print("[dim]  No delete or replace targets in plan[/dim]")
     else:
         for i, target in enumerate(report.targets):
             actions = ", ".join(action.value for action in target.actions)
             canonical = target.canonical_id if target.resolved and target.canonical_id else None
             dest = _short_id(canonical) if canonical else "[red]unresolved[/red]"
-            target_risk = target.risk.value if target.risk is not None else "unknown"
-            risk_text = Text(target_risk.upper(), style=_risk_style(target_risk))
+            value = target.verdict.value if target.verdict is not None else "not_assessed"
+            verdict_text = Text(value, style=_verdict_style(value))
+            target_gloss = (
+                VERDICT_GLOSS[target.verdict]
+                if target.verdict is not None
+                else "target could not be assessed"
+            )
 
             console.print(
                 f"\n  [bold]Target {i + 1}:[/bold] {target.address} [{actions}] -> {dest}"
             )
-            console.print(f"    Risk: {risk_text}")
+            console.print(f"    Verdict: {verdict_text}  [dim]{target_gloss}[/dim]")
 
             _render_dependents_table(target.dependents, console, "    ")
 
@@ -617,10 +788,10 @@ def render_simulate_table(report: SimulateReport) -> None:
 
 def render_reconcile_table(report: ReconcileReport) -> None:
     Console, Table, Text = _rich()
-    console = Console(force_terminal=True, legacy_windows=True, width=140)
+    console = Console()
 
     analysed = (
-        f"analysing scan run {report.analysed_scan_run_id}"
+        f"comparing scan run {report.analysed_scan_run_id}"
         if report.analysed_scan_run_id is not None
         else "no snapshot analysed"
     )
@@ -632,76 +803,135 @@ def render_reconcile_table(report: ReconcileReport) -> None:
         console.print("[dim]  No relationship candidates to compare in this snapshot[/dim]")
         return
 
+    rows = _comparison_rows(report)
+    if len(rows) != len(report.findings):
+        console.print(f"  Dependencies: [bold]{len(rows)}[/bold]  [dim]({_PER_SIDE_NOTE})[/dim]")
+
+    drift = sum(1 for item in report.findings if item.conclusion is Conclusion.UNDOCUMENTED)
+    if drift:
+        console.print(
+            f"  [bold red]{drift} observed dependenc{'y' if drift == 1 else 'ies'} "
+            "no declaration accounts for[/bold red]"
+        )
+
+    compare_table = Table(
+        title="[bold]Declared vs observed[/bold]",
+        show_header=True,
+        header_style="bold cyan",
+    )
+    compare_table.add_column("DECLARED (terraform)", overflow="fold")
+    compare_table.add_column("OBSERVED (aws)", overflow="fold")
+    compare_table.add_column("Type")
+    compare_table.add_column("Verdict", justify="center")
+    compare_table.add_column("Joined by", justify="center")
+
+    for item in rows:
+        declared = (
+            f"{_compare_label(item.declared_edge[0])}\n  -> {_compare_label(item.declared_edge[1])}"
+            if item.declared_edge is not None
+            else f"[dim]{_NO_DECLARATION.get(item.conclusion, 'not declared')}[/dim]"
+        )
+        observed = (
+            f"{_compare_label(item.observed_edge[0])}\n  -> {_compare_label(item.observed_edge[1])}"
+            if item.observed_edge is not None
+            else "[dim]not observed[/dim]"
+        )
+        compare_table.add_row(
+            declared,
+            observed,
+            item.relationship_type.value,
+            Text(item.conclusion.value, style=_conclusion_style(item.conclusion.value)),
+            item.joined_by.value if item.joined_by is not None else "-",
+        )
+    console.print(compare_table)
+
     counts_table = Table(
         title="[bold]Findings by conclusion[/bold]",
+        caption=f"[dim]{_PER_SIDE_NOTE}[/dim]" if len(rows) != len(report.findings) else None,
         show_header=True,
         header_style="bold cyan",
     )
     counts_table.add_column("Conclusion", justify="center")
-    counts_table.add_column("Count", justify="center")
+    counts_table.add_column("Rows", justify="center")
+    counts_table.add_column("Findings", justify="center")
     counts_table.add_column("Means")
 
     present = [item.conclusion for item in report.findings]
+    row_counts = _row_counts(report)
     for conclusion in CONCLUSION_ORDER:
         count = present.count(conclusion)
         if not count:
             continue
         label = Text(conclusion.value, style=_conclusion_style(conclusion.value))
-        counts_table.add_row(label, str(count), CONCLUSION_GLOSS[conclusion])
+        counts_table.add_row(
+            label, str(row_counts.get(conclusion, 0)), str(count), CONCLUSION_GLOSS[conclusion]
+        )
     console.print(counts_table)
 
-    detail_table = Table(
-        title="[bold]Detail[/bold]",
-        show_header=True,
-        header_style="bold cyan",
-    )
-    detail_table.add_column("Conclusion", justify="center")
-    detail_table.add_column("Source", overflow="fold")
-    detail_table.add_column("Type")
-    detail_table.add_column("Target", overflow="fold")
-    detail_table.add_column("Explanation", overflow="fold")
-    detail_table.add_column("Evidence", overflow="fold")
-
-    for item in report.findings:
-        label = Text(item.conclusion.value, style=_conclusion_style(item.conclusion.value))
-        detail_table.add_row(
-            label,
-            _short_id(item.source_canonical_id),
-            item.relationship_type.value,
-            _short_id(item.target_canonical_id),
-            item.explanation,
-            ", ".join(item.evidence_ids) or "-",
-        )
-    console.print(detail_table)
+    missing_summary = _missing_coverage(report)
+    if missing_summary:
+        console.print(f"  [yellow]missing coverage:[/yellow] {', '.join(missing_summary)}")
 
 
 # --- YAML rendering ----------------------------------------------------------------
 
 
-def _to_yaml(data: dict[str, Any], indent: int = 0) -> str:
-    """Convert dict to YAML string."""
-    lines = []
-    prefix = "  " * indent
-    for key, value in data.items():
-        if isinstance(value, dict):
-            lines.append(f"{prefix}{key}:")
-            lines.append(_to_yaml(value, indent + 1))
-        elif isinstance(value, list):
-            if value and isinstance(value[0], dict):
-                lines.append(f"{prefix}{key}:")
-                for item in value:
-                    lines.append(f"{prefix}  - ")
-                    lines.append(_to_yaml(item, indent + 2).lstrip())
+def _yaml_scalar(value: Any) -> str:
+    """One YAML scalar.
+
+    Strings are emitted as JSON double-quoted strings, which are also valid
+    YAML double-quoted scalars. Quoting unconditionally is what keeps the
+    output parseable at all: nearly every explanation in a report contains
+    ``: `` or ``#``, and a plain scalar containing ``: `` parses as a nested
+    mapping rather than as text.
+    """
+    if value is None:
+        return "null"
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, int | float):
+        return repr(value)
+    return json.dumps(str(value))
+
+
+def _yaml_lines(data: Any, indent: int = 0) -> list[str]:
+    """Render a JSON-shaped value as YAML lines at the given indent level."""
+    pad = "  " * indent
+    if isinstance(data, dict):
+        if not data:
+            return [f"{pad}{{}}"]
+        lines: list[str] = []
+        for key, value in data.items():
+            if isinstance(value, dict | list | tuple):
+                if not value:
+                    lines.append(f"{pad}{key}: " + ("{}" if isinstance(value, dict) else "[]"))
+                else:
+                    lines.append(f"{pad}{key}:")
+                    lines.extend(_yaml_lines(value, indent + 1))
             else:
-                for item in value:
-                    lines.append(f"{prefix}{key}: {item}")
-        elif value is None:
-            lines.append(f"{prefix}{key}: null")
-        elif isinstance(value, bool):
-            lines.append(f"{prefix}{key}: {str(value).lower()}")
-        else:
-            lines.append(f"{prefix}{key}: {value}")
-    return "\n".join(lines)
+                lines.append(f"{pad}{key}: {_yaml_scalar(value)}")
+        return lines
+    if isinstance(data, list | tuple):
+        if not data:
+            return [f"{pad}[]"]
+        lines = []
+        for item in data:
+            if isinstance(item, dict) and item:
+                # The first key sits on the dash line; `indent + 1` puts the
+                # remaining keys in the same column, which is what makes them
+                # siblings rather than a new nesting level.
+                nested = _yaml_lines(item, indent + 1)
+                lines.append(f"{pad}- {nested[0].lstrip()}")
+                lines.extend(nested[1:])
+            else:
+                lines.append(f"{pad}- {_yaml_scalar(item)}")
+        return lines
+    return [f"{pad}{_yaml_scalar(data)}"]
+
+
+def _to_yaml(data: dict[str, Any]) -> str:
+    """A report as YAML. Hand-rolled so no output format needs a dependency."""
+    return "\n".join(_yaml_lines(data))
 
 
 def render_why_yaml(report: WhyReport) -> str:
@@ -773,13 +1003,25 @@ def _dependent_to_dict(dep: Dependent) -> dict[str, Any]:
     }
 
 
+def _counts_to_dict(counts: DependentCounts) -> dict[str, Any]:
+    return {
+        "total": counts.total,
+        "documented": counts.documented,
+        "undocumented": counts.undocumented,
+        "possible": counts.possible,
+        "unknown": counts.unknown,
+    }
+
+
 def render_impact_yaml(report: ImpactReport) -> str:
     data = {
         "command": "impact",
         "subject": report.subject_canonical_id,
         "basis": report.basis.value,
         "depth": report.depth,
-        "risk": report.risk.value,
+        "verdict": report.verdict.value,
+        "verdict_means": VERDICT_GLOSS[report.verdict],
+        "counts": _counts_to_dict(report.counts),
         "dependents": [_dependent_to_dict(d) for d in report.dependents],
         "notes": list(report.notes),
     }
@@ -791,14 +1033,17 @@ def render_simulate_yaml(report: SimulateReport) -> str:
         "command": "simulate",
         "plan_path": report.plan_path,
         "assessment": report.assessment.value,
-        "overall_risk": report.risk.value if report.risk is not None else None,
+        "verdict": report.verdict.value if report.verdict is not None else None,
+        "verdict_means": (VERDICT_GLOSS[report.verdict] if report.verdict is not None else None),
+        "counts": _counts_to_dict(report.counts),
         "targets": [
             {
                 "address": t.address,
                 "actions": [a.value for a in t.actions],
                 "resolved": t.resolved,
                 "canonical_id": t.canonical_id if t.resolved else None,
-                "risk": t.risk.value if t.risk else None,
+                "verdict": t.verdict.value if t.verdict else None,
+                "counts": _counts_to_dict(t.counts),
                 "dependents": [_dependent_to_dict(d) for d in t.dependents],
                 "notes": list(t.notes),
             }
@@ -822,6 +1067,9 @@ def render_reconcile_yaml(report: ReconcileReport) -> str:
                 "source": f.source_canonical_id,
                 "target": f.target_canonical_id,
                 "relationship_type": f.relationship_type.value,
+                "declared_edge": list(f.declared_edge) if f.declared_edge else None,
+                "observed_edge": list(f.observed_edge) if f.observed_edge else None,
+                "joined_by": f.joined_by.value if f.joined_by else None,
                 "explanation": f.explanation,
                 "evidence": list(f.evidence_ids),
                 "unavailable_sources": [source.value for source in f.unavailable_sources],
@@ -887,21 +1135,32 @@ def render_impact_csv(report: ImpactReport) -> str:
     writer.writerow(["subject", report.subject_canonical_id])
     writer.writerow(["basis", report.basis.value])
     writer.writerow(["depth", report.depth])
-    writer.writerow(["risk", report.risk.value])
+    writer.writerow(["verdict", report.verdict.value])
+    writer.writerow(["verdict_means", VERDICT_GLOSS[report.verdict]])
+    writer.writerow([])
+    writer.writerow(["counts"])
+    writer.writerow(["total", "documented", "undocumented", "possible", "unknown"])
+    writer.writerow(
+        [
+            report.counts.total,
+            report.counts.documented,
+            report.counts.undocumented,
+            report.counts.possible,
+            report.counts.unknown,
+        ]
+    )
     writer.writerow([])
     writer.writerow(["dependents"])
     writer.writerow(["canonical_id", "depth", "kind", "path", "provenance", "evidence"])
     for d in report.dependents:
-        prov_str = ";".join(d.provenance)
-        ev_str = ";".join(d.evidence_ids)
         writer.writerow(
             [
                 d.canonical_id,
                 d.depth,
                 d.kind.value,
                 _path_display(d.path),
-                prov_str,
-                ev_str,
+                ";".join(d.provenance),
+                ";".join(d.evidence_ids),
             ]
         )
     writer.writerow([])
@@ -919,7 +1178,7 @@ def render_simulate_csv(report: SimulateReport) -> str:
     writer.writerow(["command", "simulate"])
     writer.writerow(["plan_path", report.plan_path])
     writer.writerow(["assessment", report.assessment.value])
-    writer.writerow(["overall_risk", report.risk.value if report.risk is not None else ""])
+    writer.writerow(["verdict", report.verdict.value if report.verdict is not None else ""])
     writer.writerow([])
     writer.writerow(["targets"])
     writer.writerow(
@@ -928,7 +1187,7 @@ def render_simulate_csv(report: SimulateReport) -> str:
             "actions",
             "resolved",
             "canonical_id",
-            "risk",
+            "verdict",
             "depth",
             "kind",
             "path",
@@ -937,34 +1196,25 @@ def render_simulate_csv(report: SimulateReport) -> str:
         ]
     )
     for t in report.targets:
+        head = [
+            t.address,
+            ";".join(a.value for a in t.actions),
+            "true" if t.resolved else "false",
+            t.canonical_id or "",
+            t.verdict.value if t.verdict else "",
+        ]
+        if not t.dependents:
+            writer.writerow([*head, "", "", "", "", ""])
+            continue
         for d in t.dependents:
             writer.writerow(
                 [
-                    t.address,
-                    ";".join(a.value for a in t.actions),
-                    "true" if t.resolved else "false",
-                    t.canonical_id or "",
-                    t.risk.value if t.risk else "",
+                    *head,
                     d.depth,
                     d.kind.value,
                     _path_display(d.path),
                     ";".join(d.provenance),
                     ";".join(d.evidence_ids),
-                ]
-            )
-        if not t.dependents:
-            writer.writerow(
-                [
-                    t.address,
-                    ";".join(a.value for a in t.actions),
-                    "true" if t.resolved else "false",
-                    t.canonical_id or "",
-                    t.risk.value if t.risk else "",
-                    "",
-                    "",
-                    "",
-                    "",
-                    "",
                 ]
             )
     writer.writerow([])
@@ -998,12 +1248,19 @@ def render_reconcile_csv(report: ReconcileReport) -> str:
             "source",
             "relationship_type",
             "target",
+            "declared_source",
+            "declared_target",
+            "observed_source",
+            "observed_target",
+            "joined_by",
             "unavailable_sources",
             "evidence",
             "explanation",
         ]
     )
     for f in report.findings:
+        declared = f.declared_edge or ("", "")
+        observed = f.observed_edge or ("", "")
         writer.writerow(
             [
                 f.finding_id,
@@ -1011,6 +1268,11 @@ def render_reconcile_csv(report: ReconcileReport) -> str:
                 f.source_canonical_id,
                 f.relationship_type.value,
                 f.target_canonical_id,
+                declared[0],
+                declared[1],
+                observed[0],
+                observed[1],
+                f.joined_by.value if f.joined_by else "",
                 ";".join(source.value for source in f.unavailable_sources),
                 ";".join(f.evidence_ids),
                 f.explanation,
@@ -1027,6 +1289,155 @@ def stable_json(model: BaseModel) -> str:
     and inputs always produce the same bytes.
     """
     return json.dumps(model.model_dump(mode="json"), indent=2, sort_keys=True)
+
+
+# --- hidden dependencies ------------------------------------------------------------
+
+
+class DriftReport(BaseModel):
+    """The hidden dependencies one reconciliation pass turned up.
+
+    A thin wrapper so ``reality drift`` has a report object like every other
+    command — same ``--output`` paths, same byte-stable JSON.
+    """
+
+    model_config = ConfigDict(frozen=True)
+
+    scan_run_id: int
+    analysed_scan_run_id: int | None = None
+    hidden: tuple[HiddenDependency, ...] = ()
+
+
+def _band_style(band: str) -> str:
+    """Rich style for a confidence band.
+
+    Unlike the retired risk bands, this one is defensible: it is derived
+    directly from the strength of the evidence behind the finding, which is a
+    property of the evidence rather than a guess about business impact.
+    """
+    styles = {
+        ConfidenceBand.STRONG.value: "bold red",
+        ConfidenceBand.MODERATE.value: "yellow",
+        ConfidenceBand.WEAK.value: "dim",
+    }
+    return styles.get(band.lower(), "")
+
+
+def render_drift(report: DriftReport) -> str:
+    analysed = (
+        f"from scan run {report.analysed_scan_run_id}"
+        if report.analysed_scan_run_id is not None
+        else "no snapshot analysed"
+    )
+    lines = [
+        f"reality: drift ({analysed})",
+        f"  hidden dependencies ({len(report.hidden)}):",
+    ]
+    if not report.hidden:
+        lines.append(
+            "    none; no observed dependency lacks a declaration, or none is backed "
+            "by observed evidence"
+        )
+        return "\n".join(lines) + "\n"
+    for item in report.hidden:
+        lines.append(
+            f"    - {item.source_canonical_id} -> {item.target_canonical_id} "
+            f"[{item.relationship_type.value}]"
+        )
+        lines.append(f"        confidence: {item.band.value}")
+        lines.append(f"        {item.rationale}")
+        if item.evidence_ids:
+            lines.append(f"        evidence: {', '.join(item.evidence_ids)}")
+    return "\n".join(lines) + "\n"
+
+
+def render_drift_table(report: DriftReport) -> None:
+    Console, Table, Text = _rich()
+    console = Console()
+
+    analysed = (
+        f"from scan run {report.analysed_scan_run_id}"
+        if report.analysed_scan_run_id is not None
+        else "no snapshot analysed"
+    )
+    console.print("[bold cyan]reality: drift[/bold cyan]")
+    console.print(f"  [dim]{analysed}[/dim]")
+    console.print(f"  Hidden dependencies: [bold]{len(report.hidden)}[/bold]")
+    if not report.hidden:
+        console.print(
+            "[dim]  None: no observed dependency lacks a declaration, or none is "
+            "backed by observed evidence[/dim]"
+        )
+        return
+
+    table = Table(
+        title="[bold]Observed, but undeclared[/bold]",
+        show_header=True,
+        header_style="bold cyan",
+    )
+    table.add_column("Source", overflow="fold")
+    table.add_column("Target", overflow="fold")
+    table.add_column("Type")
+    table.add_column("Confidence", justify="center")
+    table.add_column("Why", overflow="fold")
+
+    for item in report.hidden:
+        table.add_row(
+            _short_id(item.source_canonical_id),
+            _short_id(item.target_canonical_id),
+            item.relationship_type.value,
+            Text(item.band.value, style=_band_style(item.band.value)),
+            item.rationale,
+        )
+    console.print(table)
+
+
+def _hidden_to_dict(item: HiddenDependency) -> dict[str, Any]:
+    return {
+        "finding_id": item.finding_id,
+        "source": item.source_canonical_id,
+        "target": item.target_canonical_id,
+        "relationship_type": item.relationship_type.value,
+        "confidence": item.band.value,
+        "rationale": item.rationale,
+        "evidence": list(item.evidence_ids),
+    }
+
+
+def render_drift_yaml(report: DriftReport) -> str:
+    return _to_yaml(
+        {
+            "command": "drift",
+            "scan_run_id": report.scan_run_id,
+            "analysed_scan_run_id": report.analysed_scan_run_id,
+            "hidden": [_hidden_to_dict(item) for item in report.hidden],
+        }
+    )
+
+
+def render_drift_csv(report: DriftReport) -> str:
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow(["command", "drift"])
+    writer.writerow(["scan_run_id", report.scan_run_id])
+    writer.writerow(["analysed_scan_run_id", report.analysed_scan_run_id or ""])
+    writer.writerow([])
+    writer.writerow(
+        ["finding_id", "source", "target", "relationship_type", "confidence", "evidence", "why"]
+    )
+    for item in report.hidden:
+        writer.writerow(
+            [
+                item.finding_id,
+                item.source_canonical_id,
+                item.target_canonical_id,
+                item.relationship_type.value,
+                item.band.value,
+                ";".join(item.evidence_ids),
+                item.rationale,
+            ]
+        )
+    return output.getvalue()
 
 
 # --- Legacy text rendering (for backward compatibility) ----------------------------
@@ -1051,9 +1462,10 @@ def _render_dependents(dependents: Sequence[Dependent], indent: str) -> list[str
 
 def render_impact(report: ImpactReport) -> str:
     lines = [
-        f"reality: impact of {report.subject_canonical_id} "
-        f"(basis {report.basis.value}, depth {report.depth})",
-        f"  risk: {report.risk.value}",
+        f"reality: impact of {report.subject_canonical_id}",
+        f"  verdict:    {report.verdict.value} - {VERDICT_GLOSS[report.verdict]}",
+        f"  dependents: {report.counts.summary()}",
+        f"  basis:      {report.basis.value}, depth {report.depth}",
     ]
     lines.extend(_render_dependents(report.dependents, "  "))
     if report.notes:
@@ -1063,10 +1475,16 @@ def render_impact(report: ImpactReport) -> str:
 
 
 def render_simulate(report: SimulateReport) -> str:
+    overall = (
+        f"{report.verdict.value} - {VERDICT_GLOSS[report.verdict]}"
+        if report.verdict is not None
+        else "not_assessed - no target could be assessed"
+    )
     lines = [
         f"reality: simulate {report.plan_path} (read-only; the plan is never applied)",
+        f"  verdict:    {overall}",
         f"  assessment: {report.assessment.value}",
-        f"  overall risk: {report.risk.value if report.risk is not None else 'unknown'}",
+        f"  dependents: {report.counts.summary()}",
         f"  targets ({len(report.targets)}):",
     ]
     if not report.targets:
@@ -1075,7 +1493,12 @@ def render_simulate(report: SimulateReport) -> str:
         actions = ", ".join(action.value for action in target.actions)
         destination = target.canonical_id if target.resolved else "unresolved"
         lines.append(f"    - {target.address} [{actions}] -> {destination}")
-        lines.append(f"        risk: {target.risk.value if target.risk is not None else 'unknown'}")
+        if target.verdict is None:
+            lines.append("        verdict: not_assessed - target could not be assessed")
+        else:
+            lines.append(
+                f"        verdict: {target.verdict.value} - {VERDICT_GLOSS[target.verdict]}"
+            )
         lines.extend(_render_dependents(target.dependents, "        "))
         lines.extend(f"        note: {note}" for note in target.notes)
     if report.notes:

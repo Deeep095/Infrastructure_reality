@@ -102,7 +102,9 @@ UNAVAILABLE_CODES: frozenset[str] = frozenset(
 ClientFactory = Callable[[str], Any]
 
 
-def _default_client_factory(profile: str, region: str) -> ClientFactory:
+def _default_client_factory(
+    profile: str, region: str, endpoint_url: str | None = None
+) -> ClientFactory:
     """Build real clients from an explicitly selected profile and region.
 
     boto3 is imported here — inside the factory, never at module level —
@@ -112,7 +114,10 @@ def _default_client_factory(profile: str, region: str) -> ClientFactory:
     def create(service_name: str) -> Any:
         import boto3
 
-        return boto3.Session(profile_name=profile, region_name=region).client(service_name)
+        kwargs = {"endpoint_url": endpoint_url} if endpoint_url is not None else {}
+        return boto3.Session(profile_name=profile, region_name=region).client(
+            service_name, **kwargs
+        )
 
     return create
 
@@ -250,6 +255,7 @@ class IamAdapter(Adapter):
         *,
         profile: str,
         region: str,
+        endpoint_url: str | None = None,
         client_factory: ClientFactory | None = None,
     ) -> None:
         # The explicit profile/region gate comes before anything else: no
@@ -266,8 +272,9 @@ class IamAdapter(Adapter):
             )
         self._profile = profile
         self._region = region
+        self._endpoint_url = endpoint_url
         self._client_factory: ClientFactory = client_factory or _default_client_factory(
-            profile, region
+            profile, region, endpoint_url
         )
 
     @classmethod
@@ -280,7 +287,12 @@ class IamAdapter(Adapter):
         region = config.aws_region
         if profile is None or region is None:  # pragma: no cover - require_aws rejects this
             raise ConfigError("require_aws() must run before building the adapter")
-        return cls(profile=profile, region=region, client_factory=client_factory)
+        return cls(
+            profile=profile,
+            region=region,
+            endpoint_url=config.aws_endpoint_url,
+            client_factory=client_factory,
+        )
 
     # --- entry point --------------------------------------------------------
 
@@ -315,6 +327,22 @@ class IamAdapter(Adapter):
                     f"{len(sink.evidence)} policy-statement evidence item(s), "
                     f"{len(sink.relationships)} permission candidate(s); IAM is global — "
                     f"scan context: profile {self._profile!r}, selected region {self._region!r}"
+                ),
+                region=self._region,
+            )
+        )
+        unavailable = [item for item in sink.coverage if item.status is CoverageStatus.UNAVAILABLE]
+        sink.coverage.append(
+            Coverage(
+                source=EvidenceSource.IAM,
+                status=(CoverageStatus.UNAVAILABLE if unavailable else CoverageStatus.AVAILABLE),
+                reason=(
+                    f"IAM policy collection: {len(roles)} role(s) listed"
+                    + (
+                        "; incomplete: " + "; ".join(item.reason for item in unavailable)
+                        if unavailable
+                        else "; every discovered role and policy was readable"
+                    )
                 ),
                 region=self._region,
             )

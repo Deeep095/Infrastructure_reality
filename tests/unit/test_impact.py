@@ -33,7 +33,7 @@ from reality.services.impact import (
     DEFAULT_DEPTH,
     DependentKind,
     ImpactService,
-    RiskLevel,
+    Verdict,
 )
 from reality.services.reconcile import finding_id
 from reality.services.reports import WhyService, render_why, stable_json
@@ -185,6 +185,25 @@ def test_direct_dependent_carries_path_evidence_and_provenance(store: ScanStore)
     assert dependent.provenance == ("aws_observed",)
 
 
+def test_iam_permission_grant_is_not_a_runtime_dependent(store: ScanStore) -> None:
+    add_resource(store, DATA_LAKE, resource_type=ResourceType.S3_BUCKET)
+    add_candidate(
+        store,
+        source=PROCESSOR_ROLE,
+        target=DATA_LAKE,
+        rel_type=RelationshipType.PERMISSION_ON,
+        origin=RelationshipOrigin.IAM_POLICY,
+        evidence_id="iam:allow-s3",
+    )
+    full_coverage(store)
+
+    report = ImpactService(store).blast_radius(DATA_LAKE)
+
+    assert report is not None
+    assert report.dependents == ()
+    assert report.verdict is Verdict.NO_DEPENDENTS_FOUND
+
+
 def test_transitive_dependent_reports_the_whole_path(store: ScanStore) -> None:
     add_resource(store, WEB_SG, resource_type=ResourceType.SECURITY_GROUP)
     add_candidate(store, source=WEB, target=WEB_SG, evidence_id="aws:1")
@@ -257,15 +276,17 @@ def test_parallel_edges_from_one_dependent_are_aggregated(store: ScanStore) -> N
 
 
 @pytest.mark.parametrize(
-    ("conclusion", "kind"),
+    ("conclusion", "kind", "verdict"),
     [
-        (Conclusion.CONFIRMED, DependentKind.DOCUMENTED),
-        (Conclusion.DECLARED_ONLY, DependentKind.DOCUMENTED),
-        (Conclusion.POSSIBLE, DependentKind.POSSIBLE),
+        (Conclusion.CONFIRMED, DependentKind.DOCUMENTED, Verdict.DEPENDENTS_DOCUMENTED),
+        (Conclusion.DECLARED_ONLY, DependentKind.DOCUMENTED, Verdict.DEPENDENTS_DOCUMENTED),
+        # A permission nobody was observed using is a possibility, not something
+        # the declared world accounts for, so it leaves the verdict undecided.
+        (Conclusion.POSSIBLE, DependentKind.POSSIBLE, Verdict.INCONCLUSIVE),
     ],
 )
 def test_declared_and_permission_dependents_are_not_undocumented(
-    store: ScanStore, conclusion: Conclusion, kind: DependentKind
+    store: ScanStore, conclusion: Conclusion, kind: DependentKind, verdict: Verdict
 ) -> None:
     subject_with_dependent(store)
     add_finding(
@@ -279,10 +300,10 @@ def test_declared_and_permission_dependents_are_not_undocumented(
 
     assert report.dependents[0].kind is kind
     assert report.dependents[0].conclusion is conclusion
-    assert report.risk is RiskLevel.MEDIUM
+    assert report.verdict is verdict
 
 
-def test_undocumented_dependent_makes_the_risk_high(store: ScanStore) -> None:
+def test_undocumented_dependent_drives_the_verdict(store: ScanStore) -> None:
     subject_with_dependent(store)
     add_finding(
         store,
@@ -296,7 +317,8 @@ def test_undocumented_dependent_makes_the_risk_high(store: ScanStore) -> None:
     dependent = report.dependents[0]
     assert dependent.kind is DependentKind.UNDOCUMENTED
     assert dependent.conclusion is Conclusion.UNDOCUMENTED
-    assert report.risk is RiskLevel.HIGH
+    assert report.verdict is Verdict.UNDOCUMENTED_DEPENDENTS
+    assert report.counts.undocumented == 1
 
 
 def test_unreconciled_edge_is_unknown_with_a_reconcile_hint(store: ScanStore) -> None:
@@ -306,7 +328,9 @@ def test_unreconciled_edge_is_unknown_with_a_reconcile_hint(store: ScanStore) ->
     dependent = report.dependents[0]
     assert dependent.kind is DependentKind.UNKNOWN
     assert dependent.conclusion is None
-    assert report.risk is RiskLevel.MEDIUM
+    # An unreconciled dependent is a gap, not a reassurance: the retired risk
+    # band reported this as MEDIUM, indistinguishable from a documented one.
+    assert report.verdict is Verdict.INCONCLUSIVE
     assert any("run reality reconcile" in note for note in report.notes)
 
 
@@ -361,49 +385,83 @@ def test_most_cautionary_kind_wins_across_parallel_edges(store: ScanStore) -> No
 
     (dependent,) = report.dependents
     assert dependent.kind is DependentKind.UNDOCUMENTED  # worst case, not average
-    assert report.risk is RiskLevel.HIGH
+    assert report.verdict is Verdict.UNDOCUMENTED_DEPENDENTS
 
 
-# --- risk and coverage ---------------------------------------------------------------
+# --- verdict and coverage -------------------------------------------------------------
 
 
-def test_no_dependents_with_full_coverage_is_low(store: ScanStore) -> None:
+def test_no_dependents_with_full_coverage_is_conclusive(store: ScanStore) -> None:
     add_resource(store, DATA_LAKE, resource_type=ResourceType.S3_BUCKET)
     full_coverage(store)
     report = ImpactService(store).blast_radius(DATA_LAKE)
 
     assert report.dependents == ()
-    assert report.risk is RiskLevel.LOW
+    assert report.verdict is Verdict.NO_DEPENDENTS_FOUND
+    assert report.counts.total == 0
 
 
-def test_no_dependents_with_missing_coverage_is_medium_not_low(store: ScanStore) -> None:
+def test_iam_is_not_required_to_confirm_no_runtime_dependents(store: ScanStore) -> None:
+    add_resource(store, DATA_LAKE, resource_type=ResourceType.S3_BUCKET)
+    add_coverage(store, EvidenceSource.TERRAFORM_STATE, CoverageStatus.AVAILABLE)
+    add_coverage(store, EvidenceSource.AWS_RESOURCES, CoverageStatus.AVAILABLE)
+    add_coverage(store, EvidenceSource.CLOUDTRAIL, CoverageStatus.AVAILABLE)
+
+    report = ImpactService(store).blast_radius(DATA_LAKE)
+
+    assert report is not None
+    assert report.dependents == ()
+    assert report.verdict is Verdict.NO_DEPENDENTS_FOUND
+
+
+def test_iam_permission_grant_is_explained_but_not_a_runtime_dependent(store: ScanStore) -> None:
+    add_resource(store, DATA_LAKE, resource_type=ResourceType.S3_BUCKET)
+    add_candidate(
+        store,
+        source=PROCESSOR_ROLE,
+        target=DATA_LAKE,
+        rel_type=RelationshipType.PERMISSION_ON,
+        origin=RelationshipOrigin.IAM_POLICY,
+        evidence_id="iam:allow-s3",
+    )
+    full_coverage(store)
+
+    report = ImpactService(store).blast_radius(DATA_LAKE)
+
+    assert report is not None
+    assert report.dependents == ()
+    assert report.verdict is Verdict.NO_DEPENDENTS_FOUND
+    assert any("does not prove the resource is used at runtime" in note for note in report.notes)
+
+
+def test_no_dependents_with_missing_coverage_is_inconclusive(store: ScanStore) -> None:
     add_resource(store, DATA_LAKE, resource_type=ResourceType.S3_BUCKET)
     add_coverage(store, EvidenceSource.TERRAFORM_STATE, CoverageStatus.AVAILABLE)
     add_coverage(store, EvidenceSource.AWS_RESOURCES, CoverageStatus.AVAILABLE)
     add_coverage(store, EvidenceSource.CLOUDTRAIL, CoverageStatus.NOT_REQUESTED)
     report = ImpactService(store).blast_radius(DATA_LAKE)
 
-    assert report.risk is RiskLevel.MEDIUM
+    assert report.verdict is Verdict.INCONCLUSIVE
     assert any("cloudtrail" in note and "absence of evidence" in note for note in report.notes)
 
 
-def test_terraform_subject_needs_only_the_declared_side_for_low(store: ScanStore) -> None:
+def test_terraform_subject_needs_only_the_declared_side(store: ScanStore) -> None:
     # Only Terraform relationships can target a Terraform-namespace subject,
     # so a consulted state file is enough to rule out dependents.
     add_resource(store, TF_WEB, provider="terraform", resource_type=ResourceType.EC2_INSTANCE)
     add_coverage(store, EvidenceSource.TERRAFORM_STATE, CoverageStatus.AVAILABLE)
     report = ImpactService(store).blast_radius(TF_WEB)
 
-    assert report.risk is RiskLevel.LOW
+    assert report.verdict is Verdict.NO_DEPENDENTS_FOUND
 
 
-def test_latest_coverage_record_decides_the_risk(store: ScanStore) -> None:
+def test_latest_coverage_record_decides_the_verdict(store: ScanStore) -> None:
     add_resource(store, DATA_LAKE, resource_type=ResourceType.S3_BUCKET)
     full_coverage(store)
     add_coverage(store, EvidenceSource.CLOUDTRAIL, CoverageStatus.UNAVAILABLE)  # more recent
     report = ImpactService(store).blast_radius(DATA_LAKE)
 
-    assert report.risk is RiskLevel.MEDIUM
+    assert report.verdict is Verdict.INCONCLUSIVE
 
 
 # --- determinism and stable JSON ------------------------------------------------------
@@ -428,7 +486,7 @@ def test_report_is_deterministic_and_json_is_stable(store: ScanStore) -> None:
 
     parsed = json.loads(stable_json(first))
     assert parsed["subject_canonical_id"] == WEB_SG
-    assert parsed["risk"] == "high"
+    assert parsed["verdict"] == "undocumented_dependents"
     assert [dependent["canonical_id"] for dependent in parsed["dependents"]] == [WEB, BATCH]
     assert set(parsed["dependents"][0]) == {
         "canonical_id",
@@ -545,7 +603,7 @@ class TestWhyCommand:
 
 
 class TestImpactCommand:
-    def test_human_output_names_the_risk(
+    def test_human_output_names_the_verdict(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:
         database = seed_database(tmp_path)
@@ -553,7 +611,11 @@ class TestImpactCommand:
         assert exit_code == cli.EXIT_OK
         out = capsys.readouterr().out
         assert out.startswith(f"reality: impact of {WEB_SG}")
-        assert "risk: high" in out
+        assert "verdict:    undocumented_dependents" in out
+        # The verdict states the rule behind it, so the report explains itself.
+        assert "at least one dependent has no declaration" in out
+        # The fan-out is a plain count, never folded into a severity band.
+        assert "dependents: 1 (1 undocumented)" in out
         assert f"- {WEB} (depth 1, undocumented)" in out
         # The path is printed in the direction the edges point: the instance
         # is attached_to the security group, so the dependent leads.
@@ -566,7 +628,14 @@ class TestImpactCommand:
         first = cli.main(["--database", str(database), "impact", WEB_SG, "--json"])
         assert first == cli.EXIT_OK
         parsed = json.loads(capsys.readouterr().out)
-        assert parsed["risk"] == "high"
+        assert parsed["verdict"] == "undocumented_dependents"
+        assert parsed["counts"] == {
+            "total": 1,
+            "documented": 0,
+            "undocumented": 1,
+            "possible": 0,
+            "unknown": 0,
+        }
         assert parsed["basis"] == "discovery_graph"
         assert parsed["depth"] == DEFAULT_DEPTH
 

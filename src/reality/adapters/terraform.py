@@ -454,7 +454,7 @@ class TerraformAdapter(Adapter):
         elif tf_type == "aws_lambda_function":
             role = values.get("role")
             if role is not None:
-                specs.append((str(role), RelationshipType.PERMISSION_ON, "arn", "role"))
+                specs.append((str(role), RelationshipType.USES_ROLE, "arn", "role"))
         elif tf_type == "aws_db_instance":
             specs += [
                 (sg_id, RelationshipType.ATTACHED_TO, "native", "vpc_security_group_ids")

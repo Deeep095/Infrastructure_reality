@@ -354,8 +354,8 @@ def test_instance_to_security_group_relationships() -> None:
 def test_lambda_to_execution_role_relationship() -> None:
     result = collect_full()
     rels = relationships_as_tuples(result)
-    assert (PROCESSOR, PROCESSOR_ROLE, RelationshipType.PERMISSION_ON) in rels
-    assert (CLEANUP, CLEANUP_ROLE, RelationshipType.PERMISSION_ON) in rels
+    assert (PROCESSOR, PROCESSOR_ROLE, RelationshipType.USES_ROLE) in rels
+    assert (CLEANUP, CLEANUP_ROLE, RelationshipType.USES_ROLE) in rels
 
 
 def test_rds_to_security_group_relationship() -> None:
@@ -406,11 +406,13 @@ def test_evidence_ids_are_deterministic() -> None:
 # --- coverage -------------------------------------------------------------------------
 
 
-def test_coverage_has_one_record_per_consulted_service() -> None:
+def test_coverage_has_per_service_records_and_a_complete_summary() -> None:
     result = collect_full()
-    assert len(result.coverage) == 6  # sts + five resource services
+    assert len(result.coverage) == 7  # sts + five resource services + aggregate
     assert all(record.source == EvidenceSource.AWS_RESOURCES for record in result.coverage)
     assert all(record.region == REGION for record in result.coverage)
+    assert result.coverage[-1].status is CoverageStatus.AVAILABLE
+    assert "5/5 service queries complete" in result.coverage[-1].reason
 
 
 def test_sts_identity_is_recorded_in_coverage() -> None:
@@ -443,6 +445,9 @@ def test_access_denied_service_degrades_to_unavailable_coverage() -> None:
     ec2 = next(record for record in result.coverage if "DescribeInstances" in record.reason)
     assert ec2.status == CoverageStatus.UNAVAILABLE
     assert "UnauthorizedOperation" in ec2.reason
+    assert result.coverage[-1].status is CoverageStatus.UNAVAILABLE
+    assert "4/5 service queries complete" in result.coverage[-1].reason
+    assert "UnauthorizedOperation" in result.coverage[-1].reason
     # the scan continued: the other services are present
     ids = {r.canonical_id for r in result.resources}
     assert PROCESSOR in ids

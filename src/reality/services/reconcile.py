@@ -54,6 +54,7 @@ from reality.domain.enums import (
     Conclusion,
     CoverageStatus,
     EvidenceSource,
+    MappingBasis,
     RelationshipOrigin,
     RelationshipType,
 )
@@ -90,7 +91,14 @@ def finding_id(source: str, target: str, relationship_type: RelationshipType) ->
 
 
 class ReconciledRelationship(BaseModel):
-    """One canonical triple and the conclusion reconciliation reached about it."""
+    """One canonical triple and the conclusion reconciliation reached about it.
+
+    ``declared_edge`` and ``observed_edge`` record what each world actually
+    said about this dependency, in its own namespace, which is what lets a
+    report show the comparison rather than only its outcome. Either may be
+    ``None``, and that absence *is* the finding: nothing declared it for
+    ``UNDOCUMENTED``, nothing observed it for ``DECLARED_ONLY``.
+    """
 
     model_config = ConfigDict(frozen=True)
 
@@ -102,6 +110,24 @@ class ReconciledRelationship(BaseModel):
     explanation: str
     evidence_ids: tuple[str, ...] = ()
     unavailable_sources: tuple[EvidenceSource, ...] = ()
+    declared_edge: tuple[str, str] | None = None
+    observed_edge: tuple[str, str] | None = None
+    joined_by: MappingBasis | None = None
+
+    @property
+    def comparison_key(self) -> tuple[str, str, str]:
+        """Identifies the one real dependency this finding is about.
+
+        A joined group emits one finding per contributing namespace, so two
+        findings can describe the same dependency from either side. They share
+        this key, which is how a comparison view shows one row per dependency
+        instead of one per namespace.
+        """
+        return (
+            "|".join(self.declared_edge) if self.declared_edge else "",
+            "|".join(self.observed_edge) if self.observed_edge else "",
+            self.relationship_type.value,
+        )
 
 
 class ReconcileReport(BaseModel):
@@ -133,19 +159,33 @@ class ReconcileReport(BaseModel):
 class _Group:
     """Every snapshot candidate that shares one translated canonical triple.
 
-    ``pairs`` keeps each contributing (source, target) identity pair — the
-    findings are emitted per pair, never for a translated-only identity —
-    and ``joined`` records whether an identity mapping translated any member
-    of the group.
+    ``pairs`` keeps each contributing (source, target) identity pair mapped to
+    the origin classes that carried it — findings are emitted per pair, never
+    for a translated-only identity, and the classes are what let a report say
+    which world each pair came from. ``joined`` records whether an identity
+    mapping translated any member of the group, and ``basis`` which identifier
+    it joined on.
     """
+
+    DECLARED = "declared"
+    OBSERVED = "observed"
+    PERMISSION = "permission"
 
     def __init__(self) -> None:
         self.declared: list[RelationshipOrigin] = []
         self.observed: list[RelationshipOrigin] = []
         self.permission: list[RelationshipOrigin] = []
         self.evidence_ids: dict[str, None] = {}  # insertion-ordered dedup
-        self.pairs: dict[tuple[str, str], None] = {}  # insertion-ordered dedup
+        self.pairs: dict[tuple[str, str], set[str]] = {}  # insertion-ordered
         self.joined = False
+        self.basis: MappingBasis | None = None
+
+    def edge_for(self, *classes: str) -> tuple[str, str] | None:
+        """The first contributing pair carried by any of these origin classes."""
+        for pair, pair_classes in self.pairs.items():
+            if pair_classes.intersection(classes):
+                return pair
+        return None
 
 
 def _origins(origins: list[RelationshipOrigin]) -> str:
@@ -165,24 +205,24 @@ def _coverage_by_source(store: ScanStore, scan_run_id: int) -> dict[EvidenceSour
     return status
 
 
-def _translations(store: ScanStore, scan_run_id: int) -> dict[str, tuple[str, str]]:
+def _translations(store: ScanStore, scan_run_id: int) -> dict[str, tuple[str, str, MappingBasis]]:
     """Terraform→AWS identity translations from the snapshot's mappings.
 
-    Returns ``terraform_id -> (aws_id, evidence_id)``. A reverse collision —
-    two Terraform identities mapped onto the same AWS identity — is
-    ambiguous, so both translations are dropped: translating either would
+    Returns ``terraform_id -> (aws_id, evidence_id, basis)``. A reverse
+    collision — two Terraform identities mapped onto the same AWS identity —
+    is ambiguous, so both translations are dropped: translating either would
     silently merge two distinct declared resources.
     """
-    claims: dict[str, list[tuple[str, str]]] = {}
+    claims: dict[str, list[tuple[str, str, MappingBasis]]] = {}
     for mapping in store.identity_mappings.for_scan_run(scan_run_id):
         claims.setdefault(mapping.aws_canonical_id, []).append(
-            (mapping.terraform_canonical_id, mapping.evidence_id)
+            (mapping.terraform_canonical_id, mapping.evidence_id, mapping.basis)
         )
     return {
-        terraform_id: (aws_id, evidence_id)
+        terraform_id: (aws_id, evidence_id, basis)
         for aws_id, claim_list in claims.items()
         if len(claim_list) == 1
-        for terraform_id, evidence_id in claim_list
+        for terraform_id, evidence_id, basis in claim_list
     }
 
 
@@ -295,6 +335,8 @@ class ReconcileService:
             conclusion, unavailable, explanation = _classify(group, status)
             if group.joined:
                 explanation += _JOIN_NOTE
+            declared_edge = group.edge_for(_Group.DECLARED)
+            observed_edge = group.edge_for(_Group.OBSERVED, _Group.PERMISSION)
             # One finding per contributing identity pair: a translated group
             # still reports in each namespace that actually carried evidence.
             for pair_source, pair_target in group.pairs:
@@ -308,6 +350,9 @@ class ReconcileService:
                         explanation=explanation,
                         evidence_ids=tuple(group.evidence_ids),
                         unavailable_sources=unavailable,
+                        declared_edge=declared_edge,
+                        observed_edge=observed_edge,
+                        joined_by=group.basis,
                     )
                 )
 
@@ -378,38 +423,43 @@ class ReconcileService:
         translations = _translations(self._store, graph.scan_run_id)
         groups: dict[tuple[str, str, RelationshipType], _Group] = {}
         for relationship in graph.outgoing_all():
-            translated_source, source_evidence = self._translate(
+            translated_source, source_mapped = self._translate(
                 relationship.source_canonical_id, translations
             )
-            translated_target, target_evidence = self._translate(
+            translated_target, target_mapped = self._translate(
                 relationship.target_canonical_id, translations
             )
             key = (translated_source, translated_target, relationship.type)
             group = groups.setdefault(key, _Group())
-            group.pairs.setdefault(
-                (relationship.source_canonical_id, relationship.target_canonical_id), None
-            )
+            pair = (relationship.source_canonical_id, relationship.target_canonical_id)
+            classes = group.pairs.setdefault(pair, set())
             for evidence_id in relationship.evidence_ids:
                 group.evidence_ids.setdefault(evidence_id, None)
-            for mapped_evidence in (source_evidence, target_evidence):
-                if mapped_evidence is not None:
+            for mapped in (source_mapped, target_mapped):
+                if mapped is not None:
+                    mapped_evidence, basis = mapped
                     group.evidence_ids.setdefault(mapped_evidence, None)
                     group.joined = True
+                    group.basis = basis
             if relationship.origin in DECLARED_ORIGINS:
                 group.declared.append(relationship.origin)
+                classes.add(_Group.DECLARED)
             elif relationship.origin in OBSERVED_ORIGINS:
                 group.observed.append(relationship.origin)
+                classes.add(_Group.OBSERVED)
             elif relationship.origin in PERMISSION_ORIGINS:
                 group.permission.append(relationship.origin)
+                classes.add(_Group.PERMISSION)
         return groups
 
     @staticmethod
     def _translate(
-        canonical_id: str, translations: dict[str, tuple[str, str]]
-    ) -> tuple[str, str | None]:
-        """One identity through the snapshot's mappings: translated key and
-        the mapping's evidence ID when a translation fired."""
+        canonical_id: str, translations: dict[str, tuple[str, str, MappingBasis]]
+    ) -> tuple[str, tuple[str, MappingBasis] | None]:
+        """One identity through the snapshot's mappings: the translated key, and
+        the mapping's evidence ID and basis when a translation fired."""
         mapped = translations.get(canonical_id)
         if mapped is None:
             return canonical_id, None
-        return mapped[0], mapped[1]
+        aws_id, evidence_id, basis = mapped
+        return aws_id, (evidence_id, basis)

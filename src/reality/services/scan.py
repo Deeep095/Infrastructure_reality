@@ -380,19 +380,18 @@ class ScanService:
 
     @staticmethod
     def _result_report(label: str, result: AdapterResult) -> SourceReport:
-        available = [c for c in result.coverage if c.status == CoverageStatus.AVAILABLE]
-        if available:
-            detail = (
-                f"{len(result.resources)} resource(s), "
-                f"{len(result.relationships)} relationship candidate(s), "
-                f"{len(result.evidence)} evidence"
+        if not result.coverage:
+            return SourceReport(
+                source=label,
+                status=CoverageStatus.UNAVAILABLE,
+                detail="the source produced no coverage",
             )
-            unavailable = len(result.coverage) - len(available)
-            if unavailable:
-                detail += f"; {unavailable} sub-source(s) unavailable"
-            return SourceReport(source=label, status=CoverageStatus.AVAILABLE, detail=detail)
-        reason = next(
-            (c.reason for c in result.coverage if c.status == CoverageStatus.UNAVAILABLE),
-            "the source produced no coverage",
+        overall = result.coverage[-1]
+        detail = (
+            f"{len(result.resources)} resource(s), "
+            f"{len(result.relationships)} relationship candidate(s), "
+            f"{len(result.evidence)} evidence"
         )
-        return SourceReport(source=label, status=CoverageStatus.UNAVAILABLE, detail=reason)
+        if overall.status is not CoverageStatus.AVAILABLE:
+            detail += f"; {overall.reason}"
+        return SourceReport(source=label, status=overall.status, detail=detail)

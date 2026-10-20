@@ -331,7 +331,9 @@ def test_full_scan_counts_are_exact() -> None:
     assert len(result.resources) == 3
     assert len(result.relationships) == 8
     assert len(result.evidence) == 12
-    assert len(result.coverage) == 2  # available summary + one malformed-policy record
+    assert len(result.coverage) == 3  # detail, available summary, incomplete aggregate
+    assert result.coverage[-1].status is CoverageStatus.UNAVAILABLE
+    assert "incomplete" in result.coverage[-1].reason
 
 
 # --- pagination ------------------------------------------------------------------

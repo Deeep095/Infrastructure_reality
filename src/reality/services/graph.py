@@ -61,18 +61,46 @@ def _label_for(canonical_id: str, resource: Resource | None) -> str:
     return " | ".join(parts) if parts else canonical_id
 
 
-def _conclusion_style(conclusion: str | None) -> dict[str, str]:
-    """DOT attributes for a conclusion."""
-    styles = {
-        "confirmed": {"color": "green", "style": "solid"},
-        "undocumented": {"color": "red", "style": "bold"},
-        "possible": {"color": "orange", "style": "dashed"},
-        "declared_only": {"color": "blue", "style": "dotted"},
-        "unknown": {"color": "gray", "style": "dotted"},
+def _conclusion_colour(conclusion: str | None) -> str:
+    """The colour used for one conclusion in both exporters."""
+    colours = {
+        "confirmed": "green",
+        "undocumented": "red",
+        "possible": "orange",
+        "declared_only": "blue",
+        "unknown": "gray",
     }
-    if conclusion is None:
-        return {"color": "black", "style": "solid"}
-    return styles.get(conclusion, {"color": "black", "style": "solid"})
+    return colours.get(conclusion or "", "black")
+
+
+def _conclusion_style(conclusion: str | None) -> dict[str, str]:
+    """DOT edge attributes for a conclusion."""
+    line_styles = {
+        "confirmed": "solid",
+        "undocumented": "bold",
+        "possible": "dashed",
+        "declared_only": "dotted",
+        "unknown": "dotted",
+    }
+    return {
+        "color": _conclusion_colour(conclusion),
+        "style": line_styles.get(conclusion or "", "solid"),
+    }
+
+
+def _quote_dot(text: str) -> str:
+    """Escape a label for a DOT double-quoted string.
+
+    A Terraform address may carry an index key (``aws_instance.web["a"]``), so
+    a label can legitimately contain quotes and backslashes. Emitting those raw
+    produces a file Graphviz refuses to parse.
+    """
+    return text.replace("\\", "\\\\").replace('"', '\\"')
+
+
+def _quote_mermaid(text: str) -> str:
+    """Escape a label for a Mermaid quoted node label."""
+    return text.replace("\\", "#92;").replace('"', "#quot;")
 
 
 def _is_unresolved(canonical_id: str) -> bool:
@@ -95,10 +123,13 @@ def _collect_subgraph(
     """Collect nodes and edges for a subgraph.
 
     Returns (node_id -> resource, list of (source, target, conclusion)).
+    Parallel edges between the same pair collapse to one row: the exporters
+    draw one line per pair, so emitting the pair once per relationship type
+    would stack identical arrows on top of each other.
     """
     edge_conclusions = view.edge_conclusions()
     node_resources: dict[str, Resource | None] = {}
-    edges: list[tuple[str, str, str | None]] = []
+    seen_edges: dict[tuple[str, str], str | None] = {}
     queue: deque[tuple[str, int]] = deque([(root, 0)])
     visited: set[str] = set()
 
@@ -110,10 +141,8 @@ def _collect_subgraph(
             continue
         visited.add(node)
 
-        resource = view.get_resource(node)
-        node_resources[node] = resource
+        node_resources[node] = view.get_resource(node)
 
-        # Follow the requested direction
         related = view.incoming(node) if direction == "incoming" else view.outgoing(node)
         for edge in related:
             other = (
@@ -121,12 +150,14 @@ def _collect_subgraph(
             )
             if not include_unresolved and _is_unresolved(other):
                 continue
-            # Look up conclusion from reconciliation findings
+            # Findings are keyed in edge direction (source -> target), which is
+            # the reverse of the traversal when walking incoming edges.
             key = (node, other) if direction == "incoming" else (other, node)
-            conclusion = edge_conclusions.get(key)
-            edges.append((node, other, conclusion))
+            seen_edges.setdefault((node, other), edge_conclusions.get(key))
             if other not in visited and d < depth:
                 queue.append((other, d + 1))
+
+    edges = [(source, target, conclusion) for (source, target), conclusion in seen_edges.items()]
 
     return node_resources, edges
 
@@ -170,18 +201,16 @@ class GraphExporter:
         lines = ["digraph G {", "  rankdir=LR;", '  node [fontname="Helvetica"];']
         id_map = {cid: _sanitize_id(cid) for cid in node_resources}
 
-        # Declare all nodes
         for cid, resource in node_resources.items():
-            nid = id_map[cid]
-            label = _label_for(cid, resource)
-            lines.append(f'  {nid} [label="{label}"];')
+            label = _quote_dot(_label_for(cid, resource))
+            lines.append(f'  {id_map[cid]} [label="{label}"];')
 
-        # Edges with conclusion styling
         for src, tgt, conclusion in edges:
             if src not in id_map or tgt not in id_map:
                 continue
-            style = _conclusion_style(conclusion)
-            attrs = ", ".join(f'{k}="{v}"' for k, v in style.items())
+            attrs = ", ".join(f'{k}="{v}"' for k, v in _conclusion_style(conclusion).items())
+            if conclusion:
+                attrs += f', label="{_quote_dot(conclusion)}"'
             lines.append(f"  {id_map[src]} -> {id_map[tgt]} [{attrs}];")
 
         lines.append("}")
@@ -196,32 +225,29 @@ class GraphExporter:
         lines = ["graph TD"]
         id_map = {cid: _sanitize_id(cid) for cid in node_resources}
 
-        # Declare all nodes with labels
         for cid, resource in node_resources.items():
-            nid = id_map[cid]
-            label = _label_for(cid, resource).replace('"', "#quot;")
-            lines.append(f'  {nid}["{label}"]')
+            label = _quote_mermaid(_label_for(cid, resource))
+            lines.append(f'  {id_map[cid]}["{label}"]')
 
-        # Edges with clickable styling via classDef
-        class_defs: set[str] = set()
+        # The conclusion colours the *link*, not the nodes. Styling nodes was
+        # wrong twice over: a node on two edges with different conclusions can
+        # only carry one class, and the conclusion describes the dependency
+        # rather than either resource. The old classDef also set the text
+        # colour equal to the fill, which rendered every label invisible.
+        link_styles: list[str] = []
         for src, tgt, conclusion in edges:
             if src not in id_map or tgt not in id_map:
                 continue
+            index = len(link_styles)
             if conclusion:
-                class_name = f"class_{conclusion}"
-                class_defs.add(class_name)
                 lines.append(f"  {id_map[src]} -->|{conclusion}| {id_map[tgt]}")
-                lines.append(f"  class {id_map[src]},{id_map[tgt]} {class_name}")
+                colour = _conclusion_colour(conclusion)
+                link_styles.append(f"  linkStyle {index} stroke:{colour},stroke-width:2px;")
             else:
                 lines.append(f"  {id_map[src]} --> {id_map[tgt]}")
+                link_styles.append("")
 
-        # Class definitions for styling
-        for class_name in sorted(class_defs):
-            conclusion = class_name.replace("class_", "")
-            style = _conclusion_style(conclusion)
-            color = style["color"]
-            lines.append(f"  classDef {class_name} fill:{color},color:{color},stroke-width:2px;")
-
+        lines.extend(style for style in link_styles if style)
         return "\n".join(lines)
 
 

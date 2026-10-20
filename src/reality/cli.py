@@ -39,9 +39,10 @@ from reality.services.impact import (
     Assessment,
     ImpactReport,
     ImpactService,
-    RiskLevel,
     SimulateReport,
     SimulateService,
+    Verdict,
+    verdict_rank,
 )
 from reality.services.progress import (
     Cancelled as ScanCancelled,
@@ -116,36 +117,60 @@ class OutputFormat:
 
 
 class FailOn:
-    """``--fail-on`` thresholds, from permissive to strictest.
+    """``--fail-on`` thresholds for ``impact`` and ``simulate``.
 
-    ``NEVER`` is the default because deciding what to do about a risky report
-    is a policy question that belongs to the caller, not to this tool: the
-    report is always printed, and the exit code only reports whether the
-    caller's own threshold was met.
+    Ordered permissive to strictest, each naming *what was found* rather than
+    how severe it is — the tool reports evidence, and how much a given blast
+    radius matters is the caller's call. ``NEVER`` is the default because
+    deciding what to do about a report is a policy question: the report is
+    always printed, and the exit code only says whether the caller's own
+    threshold was met.
+
+    ``high`` and ``medium`` are still accepted, as deprecated aliases for the
+    risk bands these replaced, so a pipeline written against the old flag keeps
+    exiting the same way.
     """
 
     NEVER = "never"
-    MEDIUM = "medium"
-    HIGH = "high"
-    ALL = (NEVER, MEDIUM, HIGH)
+    UNDOCUMENTED = "undocumented"
+    INCONCLUSIVE = "inconclusive"
+    ANY_DEPENDENTS = "any-dependents"
+    ALL = (NEVER, UNDOCUMENTED, INCONCLUSIVE, ANY_DEPENDENTS)
+
+    #: Retired risk bands, mapped to the threshold with identical behaviour:
+    #: `high` fired on an undocumented dependent, `medium` on any dependent at
+    #: all or on missing coverage.
+    DEPRECATED = {"high": UNDOCUMENTED, "medium": ANY_DEPENDENTS}
 
 
-#: The lowest band that satisfies each threshold.
-_FAIL_ON_BAND: dict[str, RiskLevel] = {
-    FailOn.MEDIUM: RiskLevel.MEDIUM,
-    FailOn.HIGH: RiskLevel.HIGH,
-}
-
-#: Bands ordered most to least severe, for the threshold comparison.
-_SEVERITY: dict[RiskLevel, int] = {
-    RiskLevel.LOW: 0,
-    RiskLevel.MEDIUM: 1,
-    RiskLevel.HIGH: 2,
+#: The least cautionary verdict each threshold trips on. A threshold is met
+#: when the report's verdict is at least this cautionary.
+_FAIL_ON_FLOOR: dict[str, Verdict] = {
+    FailOn.UNDOCUMENTED: Verdict.UNDOCUMENTED_DEPENDENTS,
+    FailOn.INCONCLUSIVE: Verdict.INCONCLUSIVE,
+    FailOn.ANY_DEPENDENTS: Verdict.DEPENDENTS_DOCUMENTED,
 }
 
 
 class CommandNotImplemented(Exception):
     """A registered command whose behaviour arrives in a later phase."""
+
+
+def _fail_on_threshold(value: str) -> str:
+    """argparse type for --fail-on: a threshold, or a deprecated risk band."""
+    if value in FailOn.ALL:
+        return value
+    replacement = FailOn.DEPRECATED.get(value)
+    if replacement is not None:
+        print(
+            f"reality: warning: --fail-on {value} is deprecated "
+            f"(the risk bands are gone); use --fail-on {replacement}",
+            file=sys.stderr,
+        )
+        return replacement
+    raise argparse.ArgumentTypeError(
+        f"invalid choice: {value!r} (choose from {', '.join(FailOn.ALL)})"
+    )
 
 
 def _positive_int(value: str) -> int:
@@ -195,6 +220,11 @@ def _add_common_flags(parser: argparse.ArgumentParser, *, global_defaults: bool)
         "--region",
         default=argparse.SUPPRESS,
         help="AWS region; required with --aws",
+    )
+    parser.add_argument(
+        "--endpoint-url",
+        default=argparse.SUPPRESS,
+        help="AWS-compatible emulator endpoint (for example LocalStack)",
     )
 
 
@@ -326,7 +356,10 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="alias for --output json",
     )
-    impact = sub.add_parser("impact", help="report the blast radius of a resource")
+    impact = sub.add_parser(
+        "impact",
+        help="trace declared and observed dependents (IAM grants are not runtime use)",
+    )
     _add_common_flags(impact, global_defaults=False)
     impact.add_argument("resource", help="canonical ID, Terraform address, ARN, or native ID")
     impact.add_argument(
@@ -348,11 +381,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     impact.add_argument(
         "--fail-on",
-        choices=FailOn.ALL,
+        type=_fail_on_threshold,
         default=FailOn.NEVER,
+        metavar="{" + ",".join(FailOn.ALL) + "}",
         help=(
-            f"exit {EXIT_POLICY} when the blast radius reaches this band; "
-            "the report is printed either way (default: %%(default)s)"
+            f"exit {EXIT_POLICY} when the verdict reaches this threshold; "
+            "the report is printed either way (default: never)"
         ),
     )
 
@@ -411,11 +445,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     simulate.add_argument(
         "--fail-on",
-        choices=FailOn.ALL,
+        type=_fail_on_threshold,
         default=FailOn.NEVER,
+        metavar="{" + ",".join(FailOn.ALL) + "}",
         help=(
-            f"exit {EXIT_POLICY} when the overall risk reaches this band; "
-            "the report is printed either way (default: %%(default)s)"
+            f"exit {EXIT_POLICY} when the overall verdict reaches this threshold; "
+            "the report is printed either way (default: never)"
         ),
     )
     simulate.add_argument(
@@ -448,7 +483,7 @@ def _flag(args: argparse.Namespace, name: str) -> str | Path | None:
 
 
 def _string_flag(args: argparse.Namespace, name: str) -> str | None:
-    """A flag known to be a plain string (profile, region)."""
+    """A flag known to be a plain string (profile, region, endpoint)."""
     value = _flag(args, name)
     return value if isinstance(value, str) else None
 
@@ -505,6 +540,7 @@ def _build_config(args: argparse.Namespace, settings: UserSettings) -> RealityCo
         default="reality.db",
     )
     profile, region = _resolve_aws(args, settings)
+    endpoint_url = _string_flag(args, "endpoint_url")
     # The database always resolves: it has a built-in default, unlike the AWS
     # profile and region, which stay absent until something supplies them.
     if database.value is None:  # pragma: no cover - a default is always given
@@ -514,6 +550,7 @@ def _build_config(args: argparse.Namespace, settings: UserSettings) -> RealityCo
         aws_opt_in=bool(getattr(args, "aws", False)),
         aws_profile=profile.value,
         aws_region=region.value,
+        aws_endpoint_url=endpoint_url,
     )
 
 
@@ -848,7 +885,7 @@ def _run_impact(config: RealityConfig, args: argparse.Namespace) -> int:
     rendered = _render_output(report, args.output, "impact", args)
     if rendered != EXIT_OK:
         return rendered
-    return _fail_on(report.risk, args.fail_on)
+    return _fail_on(report.verdict, args.fail_on)
 
 
 def _run_graph(config: RealityConfig, args: argparse.Namespace) -> int:
@@ -857,10 +894,15 @@ def _run_graph(config: RealityConfig, args: argparse.Namespace) -> int:
         discovery_run_id = store.scan_runs.latest_discovery_run()
         if discovery_run_id is None:
             raise ScanInputError("no discovery scan runs found; run 'reality scan' first")
+        # Accept the same forms as why/impact. A Terraform address or a native
+        # ID is what someone actually has in front of them, and requiring a
+        # full canonical ID here while the sibling commands take either is a
+        # trap rather than a safeguard.
+        resource_id = _resolve_resource_id(store, args.resource)
         # Findings are stored in the reconciliation scan run, not the discovery run.
         reconciliation_run_id = store.scan_runs.latest_reconciliation_run()
         view = GraphView(store, discovery_run_id, findings_scan_run_id=reconciliation_run_id)
-        resolved = view.resolve_subject(args.resource)
+        resolved = view.resolve_subject(resource_id)
         if resolved is None:
             raise ScanInputError(f"resource not found: {args.resource}")
         output = view.export_graph(
@@ -881,26 +923,28 @@ def _run_simulate(config: RealityConfig, args: argparse.Namespace) -> int:
     if rendered != EXIT_OK:
         return rendered
     # An inconclusive assessment is a verdict of its own: a plan whose targets
-    # could not be resolved is not safe to proceed on, whatever the known risk.
+    # could not be resolved is not safe to proceed on, whatever was found for
+    # the targets that did resolve.
     if args.fail_on_unknown and report.assessment is not Assessment.COMPLETE:
         return EXIT_POLICY
-    return _fail_on(report.risk, args.fail_on)
+    return _fail_on(report.verdict, args.fail_on)
 
 
-def _fail_on(risk: RiskLevel | None, threshold: str) -> int:
-    """Whether the caller's own risk threshold was met.
+def _fail_on(verdict: Verdict | None, threshold: str) -> int:
+    """Whether the caller's own threshold was met.
 
     The report has already been printed by the time this runs: the exit code
     carries the verdict, never the explanation. ``--fail-on never`` always
-    succeeds, and an unknown risk (``None``) never trips a threshold — absence
-    of a computed risk is not a low one.
+    succeeds, and a report with no verdict at all (``None`` — nothing could be
+    assessed) never trips a threshold on its own; ``--fail-on-unknown`` is the
+    flag for caring about that.
     """
-    if risk is None:
+    if verdict is None:
         return EXIT_OK
-    floor = _FAIL_ON_BAND.get(threshold)
+    floor = _FAIL_ON_FLOOR.get(threshold)
     if floor is None:
         return EXIT_OK
-    return EXIT_POLICY if _SEVERITY[risk] >= _SEVERITY[floor] else EXIT_OK
+    return EXIT_POLICY if verdict_rank(verdict) >= verdict_rank(floor) else EXIT_OK
 
 
 def _render_output(

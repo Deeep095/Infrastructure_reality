@@ -26,7 +26,6 @@ dev = [
     "ruff>=0.6",
     "mypy>=1.11",
     "rich>=13",
-    "moto[all]>=5.0",
 ]
 
 [project.scripts]
@@ -41,6 +40,9 @@ packages = ["src/reality"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "-q"
+markers = [
+    "emulator: builds real boto3 clients, allowed only against a loopback endpoint_url",
+]
 
 [tool.ruff]
 line-length = 100

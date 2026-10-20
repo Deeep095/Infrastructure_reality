@@ -1,166 +1,60 @@
-# Handoff: Complete `reality` Project
+# Project handoff: `reality`
 
-## Current State (pushed to main @ 4fa5b75)
+## Current state
 
-All gates green: **528 tests pass, mypy clean (29 files), ruff clean**.
+`reality` is a working Python CLI prototype for local Terraform-export parsing, optional read-only AWS collection, evidence-based reconciliation, resource explanations, graph export, impact traversal, and plan-target simulation. The repo includes an offline fixture-backed demo and unit/integration tests.
 
-### What Works
-- `reality scan` (local Terraform + optional AWS)
-- `reality reconcile` with `--fail-on` + `--conclusion` filter
-- `reality why` / `impact` / `simulate` / `graph`
-- `reality config` (init/show/path) + `reality doctor`
-- Test isolation via `tests/conftest.py` (REALITY_CONFIG + boto3 guard)
-- AWS provenance note before first call
+The project is not a complete AWS inventory, production risk engine, or outage-prevention product. Its present AWS scope is a few resource types and relationship shapes in one selected region, plus global IAM/S3 behavior. CloudTrail lookup is explicitly bounded and does not provide general data-plane usage history.
 
-### Remaining Work
+### Main paths
 
-| Priority | Item | Details |
-|----------|------|---------|
-| **P0** | **Complex demo environment** | `Atest/` with recorded AWS responses (moto/localstack) + multi-resource Terraform state → run full `scan → reconcile → why/impact/graph/simulate` offline |
-| **P0** | **CLI visual polish** | Rich tables aligned, colors per conclusion, progress bars, `--output table` default when rich installed, mermaid copy-paste friendly |
-| **P1** | **Package metadata** | `py.typed`, version from `pyproject.toml`, `pip install -e .` produces `reality` entry point |
-| **P1** | **Docs/README sync** | All new flags documented, mermaid examples, CI gate example |
-| **P2** | **Cleanup** | Remove `debug_*.py`, `Atest/*.db` (gitignore), any `__pycache__` |
-| **P2** | **Emulator integration** | Add `moto` to dev extra; script to record real AWS → replay offline |
+- `src/reality/cli.py` — parser, safety gates, command dispatch, output selection.
+- `src/reality/adapters/` — Terraform JSON, selected AWS resources, IAM policies, CloudTrail.
+- `src/reality/services/reconcile.py` — snapshot-scoped comparison and conclusions.
+- `src/reality/services/impact.py` — bounded reverse traversal and plan simulation.
+- `src/reality/services/reports.py` — text/table/JSON/YAML/CSV renderers.
+- `src/reality/storage/` — SQLite schema, migrations, and repositories.
+- `scripts/build_demo_db.py` — offline demo fixture replay.
+- `tests/` — unit, integration, and offline demo coverage.
 
----
+## Important model distinctions
 
-## Immediate Next Steps for Next Agent
+- Terraform declarations, AWS observations, IAM permissions, and CloudTrail activity are not interchangeable evidence.
+- A Lambda's configured execution role is modeled as `uses_role`; an IAM grant is `permission_on` and is not proof of runtime use.
+- IAM-policy-only edges are excluded from impact dependents. Reconciliation still reports permission-only candidates as `possible`.
+- `high` / `medium` / `low` in impact are deterministic review bands, not calibrated risk values.
+- Missing coverage must remain visible. Do not turn an unrequested or unavailable source into evidence of absence.
+- Avoid fuzzy name-based joins. Exact identifiers and explicit identity mappings are part of the safety contract.
 
-### 1. Build `Atest/complex-demo/` (offline, reproducible)
+## Verification
 
-```
-Atest/complex-demo/
-├── terraform/
-│   ├── main.tf              # VPC, SG, EC2, RDS, Lambda, IAM, S3, CloudFront
-│   └── terraform.tfstate    # Pre-recorded state (json)
-├── moto-responses/
-│   ├── ec2.json             # DescribeInstances, DescribeSecurityGroups, etc.
-│   ├── iam.json             # ListRoles, GetRolePolicy, SimulatePrincipalPolicy
-│   ├── cloudtrail.json      # LookupEvents for 30-day window
-│   └── lambda.json          # ListFunctions, GetFunction
-├── run_demo.py              # Orchestrates: scan → reconcile → why/impact/graph/simulate
-└── expected/                # Golden outputs for regression
-    ├── reconcile.json
-    ├── graph-*.mmd
-    └── impact.json
-```
-
-**Constraints**: Zero real AWS calls. Use `moto` to mock boto3, or pre-recorded JSON fixtures. The demo must run in CI (GitHub Actions) without credentials.
-
-### 2. CLI Visual Polish
-
-- **Rich tables**: Conclusion colors (green/red/orange/blue/gray), fixed column widths, wrap long IDs
-- **Progress**: Spinner + "source: X resources" per source, ETA for CloudTrail
-- **`--output table`**: Auto-enable when `rich` installed and stdout is TTY
-- **Mermaid**: Sanitized IDs (`n<hash>`), labels with `terraform_address | native_id | arn_suffix`, classDef per conclusion
-- **Error messages**: "Did you mean X?" for ambiguous IDs, show resolution path
-
-### 3. Package Metadata
-
-```toml
-# pyproject.toml additions
-[tool.setuptools.packages.find]
-where = ["src"]
-
-[tool.mypy]
-python_version = "3.12"
-```
-
-Add `src/reality/py.typed` (empty file). Version from `pyproject.toml` via `importlib.metadata`.
-
-### 4. Cleanup
+Run from the repository root with the development environment installed:
 
 ```bash
-# Add to .gitignore
-**/__pycache__/
-*.db
-*.pyc
-debug_*.py
-Atest/*.db
-Atest/complex-demo/*.db
+python -m pytest
+python -m ruff check src tests
+python -m mypy
+python scripts/build_demo_db.py --out demo.db
 ```
 
-Delete `debug_graph.py`, `debug_schema.py` from repo root.
+The AWS demo replay uses local JSON fixtures and must stay offline. Never run a live-account test unless the user explicitly requests it and the read-only/profile/region boundary is confirmed.
 
-### 5. Emulator Script (optional but high leverage)
+## Highest-priority follow-up
 
-```bash
-# scripts/record_aws.py --profile deepanshu --region us-east-1 --output Atest/complex-demo/moto-responses/
-# Uses boto3 to hit real AWS once, saves JSON fixtures
-# CI replays via moto: responses from JSON, zero network
-```
+1. **Relationship-aware AWS coverage.** AWS resources, IAM, and CloudTrail now retain per-call coverage and a final completeness record; one failed call can no longer be hidden by another successful call. This is intentionally conservative. Next, associate each relationship family with the exact API capabilities that can reveal it, so an unrelated denied call does not make every conclusion unknown. Keep regression tests for partial scans.
+2. **Document the comparison boundary in reports.** Make it obvious that reconciliation compares extracted relationship candidates, not entire Terraform and AWS inventories. Keep unsupported resource families visibly out of scope.
+3. **Improve finding usability.** The table/text report should make conclusion, relationship type, endpoints, evidence source, and coverage caveat easy to scan without dumping opaque IDs first. Keep JSON stable and machine-friendly.
+4. **Validate the relationship catalog.** Every new edge needs a documented direction and meaning (for example, configured role use versus policy authorization), tests for the exact source field, and a statement about what the edge does _not_ prove.
+5. **Validate packaging and live compatibility separately.** Test clean installation and supported Python versions; add carefully scoped AWS integration validation only after fixture coverage and API permission docs are clear.
 
----
+## Do not do next
 
-## Current Atest/ State (for context)
+- Do not add lots of AWS services just to increase node or edge counts.
+- Do not label all permission grants as dependencies or runtime usage.
+- Do not advertise `high` / `medium` / `low` as measured or objective risk.
+- Do not claim full AWS drift detection, complete account coverage, outage prevention, or multi-cloud readiness without evidence.
+- Do not remove explanatory comments that document a safety boundary or a non-obvious domain rule. Remove stale instructions and repeated narration instead.
 
-```bash
-Atest/
-├── reality.db          # Last scan (30 IAM roles, 2 SGs, 2 Lambdas, 9 TF resources)
-└── state.json          # Terraform state used
-```
+## User-facing docs
 
-Run from `Atest/`:
-```bash
-reality graph "aws/iam/role/-/905418449359/aws-service-role/resource-explorer-2.amazonaws.com/AWSServiceRoleForResourceExplorer" --direction outgoing --output mermaid
-reality graph "aws/logs/log-group/us-east-1/905418449359/aws/lambda/PostUploadFunction" --output mermaid  # fix ID first
-reality reconcile --fail-on undocumented --output table
-reality impact "aws/iam/role/-/905418449359/AmazonSSMAutomationRole" --fail-on high
-reality simulate state.json  # needs plan.json
-```
-
----
-
-## Key Files to Know
-
-| File | Purpose |
-|------|---------|
-| `src/reality/cli.py` | Entry point, parser, dispatch, provenance note |
-| `src/reality/services/graph.py` | `GraphView`, `GraphExporter` (DOT/Mermaid/text) |
-| `src/reality/services/reconcile.py` | Verdict logic, `ReconcileReport.filter_conclusion` |
-| `src/reality/services/reports.py` | Renderers (text/table/JSON/YAML/CSV) |
-| `src/reality/settings.py` | Config precedence, TOML, doctor checks |
-| `tests/conftest.py` | Isolation fixtures (autouse) |
-| `tests/unit/test_settings_and_doctor.py` | 41 tests for config/doctor/contract |
-
----
-
-## Acceptance Criteria for "Done"
-
-1. `cd Atest/complex-demo && python run_demo.py` runs **fully offline**, produces:
-   - `reconcile` with mixed conclusions (confirmed/undocumented/possible/declared_only/unknown)
-   - `graph --output mermaid` with ≥20 nodes, styled edges
-   - `impact` with blast radius depth ≥3
-   - `simulate` with plan showing replace/delete targets
-2. `pip install -e . && reality --version` works
-3. `reality --help` shows all flags; `reality doctor` shows green checks
-4. GitHub Actions: `ubuntu-latest` + `windows-latest` both pass
-5. No uncommitted `.db`, `__pycache__`, `debug_*.py`
-
----
-
-## Example Prompt for Next Agent
-
-> "Finish the `reality` project. Build `Atest/complex-demo/` with a complex Terraform state + moto-recorded AWS responses so the full pipeline runs offline. Polish CLI output (rich tables, mermaid, progress). Add `py.typed`, version, entry point. Clean up temp files. All gates must pass on Linux + Windows CI."
-
----
-
-## Current Command Outputs (for reference)
-
-```bash
-# From Atest/ after scan+reconcile
-$ reality reconcile --fail-on undocumented
-reality: reconcile pass 5 (analysing scan run 4)
-  findings (220): undocumented 13, declared_only 8, possible 199
-  undocumented (13) - observed in the cloud, but no declaration accounts for it
-    - aws:iam/role:905418449359:AWSServiceRoleForResourceExplorer -> aws:logs/log-group::us-east-1:905418449359:aws/lambda/PostUploadFunction [depends_on]
-    ...
-
-$ reality graph "aws/iam/role/-/905418449359/aws-service-role/resource-explorer-2.amazonaws.com/AWSServiceRoleForResourceExplorer" --direction outgoing --output mermaid
-graph TD
-  n30a7994c5da9["AmazonSSMAutomationRole | role/AmazonSSMAutomationRole"]
-  # (no edges because permissions target unresolved:* filtered by default)
-```
-
-The demo environment must produce richer graphs — multiple hops, mixed conclusions, visible blast radius.
+`README.md` is the main usage guide. `INTERVIEW_GUIDE.md` contains a deliberately conservative interview pitch and a current-scope checklist. `AWS_DATA_COLLECTION_EXPLAINED.md` documents actual collection calls and their limits. Keep all three aligned with the adapters and tests when behavior changes.

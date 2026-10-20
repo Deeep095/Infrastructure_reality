@@ -132,7 +132,7 @@ def test_security_group_attachment_resolves_via_native_id(adapter) -> None:
 
 def test_lambda_role_attachment_resolves_via_declared_arn(adapter) -> None:
     result = adapter.parse_document(load_fixture("state.json"))
-    rel = relationship(result, LAMBDA, ROLE, RelationshipType.PERMISSION_ON)
+    rel = relationship(result, LAMBDA, ROLE, RelationshipType.USES_ROLE)
     assert rel.target_canonical_id == ROLE
 
 

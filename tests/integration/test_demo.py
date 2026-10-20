@@ -77,7 +77,9 @@ def test_readme_demo_runs_offline(
     # 3. Impact: reverse traversal; unreconciled dependents stay unknown.
     assert cli.main([*base, "impact", TF_WEB_SG]) == cli.EXIT_OK
     impact_out = capsys.readouterr().out
-    assert "risk: medium" in impact_out
+    # Dependents exist but none is reconciled, so nothing can be concluded
+    # about them yet: the verdict is undecided, not reassuring.
+    assert "verdict:    inconclusive" in impact_out
     assert f"- {TF_PRIMARY} (depth 1, unknown)" in impact_out
     assert f"- {TF_WEB} (depth 1, unknown)" in impact_out
     assert "run reality reconcile" in impact_out
@@ -86,5 +88,5 @@ def test_readme_demo_runs_offline(
     assert cli.main([*base, "simulate", str(TF_PLAN)]) == cli.EXIT_OK
     simulate_out = capsys.readouterr().out
     assert "read-only; the plan is never applied" in simulate_out
-    assert "overall risk: low" in simulate_out
+    assert "verdict:    no_dependents_found" in simulate_out
     assert f"aws_instance.web [replace] -> {TF_WEB}" in simulate_out

@@ -13,6 +13,7 @@ whitelist.
 from __future__ import annotations
 
 import json
+from collections.abc import Iterator
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -221,7 +222,7 @@ def make_service(
 
 
 @pytest.fixture()
-def store(tmp_path: Path) -> ScanStore:
+def store(tmp_path: Path) -> Iterator[ScanStore]:
     conn = connect(tmp_path / "scan.db")
     migrate(conn)
     yield ScanStore(conn)
@@ -240,7 +241,7 @@ def test_full_scan_persists_all_sources_in_one_run(store: ScanStore) -> None:
     assert statuses == {
         "terraform": CoverageStatus.AVAILABLE,
         "aws_resources": CoverageStatus.AVAILABLE,
-        "iam": CoverageStatus.AVAILABLE,
+        "iam": CoverageStatus.UNAVAILABLE,
         "cloudtrail": CoverageStatus.AVAILABLE,
     }
     assert report.scan_run_id == 1
@@ -402,13 +403,15 @@ def test_aws_failure_is_reduced_coverage_not_a_failed_scan(store: ScanStore) -> 
 
     statuses = {source.source: source.status for source in report.sources}
     assert statuses["aws_resources"] == CoverageStatus.UNAVAILABLE
-    assert statuses["iam"] == CoverageStatus.AVAILABLE
+    assert statuses["iam"] == CoverageStatus.UNAVAILABLE
     assert statuses["terraform"] == CoverageStatus.AVAILABLE
 
     # The scan still succeeded and persisted everything it could collect.
+    # IAM resources were collected, but one malformed policy keeps its source
+    # coverage incomplete rather than allowing partial results to look complete.
     assert store.scan_runs.count() == 1
     assert store.resources.get(TF_WEB) is not None
-    assert store.resources.get(PROCESSOR_ROLE) is not None  # IAM was unaffected
+    assert store.resources.get(PROCESSOR_ROLE) is not None
     unavailable = [
         record
         for record in store.coverage.all_records()
@@ -417,6 +420,19 @@ def test_aws_failure_is_reduced_coverage_not_a_failed_scan(store: ScanStore) -> 
     ]
     assert unavailable
     assert "GetCallerIdentity" in unavailable[0].reason
+
+
+def test_partial_resource_collection_is_reported_as_incomplete(store: ScanStore) -> None:
+    script = full_script()
+    script["ec2"]["describe_instances"] = [FakeClientError("UnauthorizedOperation")]
+    report = make_service(store, script).run([TF_STATE])
+
+    statuses = {source.source: source.status for source in report.sources}
+    assert statuses["aws_resources"] is CoverageStatus.UNAVAILABLE
+    resource_status = next(source for source in report.sources if source.source == "aws_resources")
+    assert "4/5 service queries complete" in resource_status.detail
+    assert "UnauthorizedOperation" in resource_status.detail
+    assert store.resources.get(PROCESSOR_ROLE) is not None  # other adapters still completed
 
 
 def test_invalid_local_input_writes_nothing(tmp_path: Path, store: ScanStore) -> None:

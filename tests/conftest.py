@@ -18,15 +18,18 @@ factory should never be reached; when one is, the cause is a code path that
 built a client from the ambient credential chain — the one thing this project
 promises never to do by accident. The three ``botocore`` Stubber tests construct
 their own session with fake credentials and stub every call, so they never pass
-through these factories and keep working.
+through these factories and keep working. A test marked ``emulator`` exists to
+exercise the real factory, so it gets it back - but only for an
+``endpoint_url`` on loopback; without one, the client would reach real AWS.
 """
 
 from __future__ import annotations
 
 import importlib
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any, NoReturn
+from urllib.parse import urlparse
 
 import pytest
 
@@ -57,6 +60,9 @@ _AWS_VARS = (
 #: code base has to a real AWS client.
 _ADAPTERS_WITH_CLIENTS = ("aws_resources", "cloudtrail", "iam")
 
+#: The only hosts an ``emulator`` test may point the real factory at.
+_LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
+
 
 @pytest.fixture(autouse=True)
 def isolated_settings(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
@@ -74,18 +80,28 @@ def isolated_settings(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterat
 
 
 @pytest.fixture(autouse=True)
-def no_real_aws(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+def no_real_aws(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     """Make any attempt to build a real AWS client fail the test loudly."""
+    emulator = request.node.get_closest_marker("emulator") is not None
 
-    def refuse(profile: str, region: str) -> NoReturn:
+    def refuse(profile: str, region: str, endpoint_url: str | None = None) -> NoReturn:
         raise AssertionError(
             "a test tried to build a real AWS client "
-            f"(profile={profile!r}, region={region!r}). Tests must inject a "
-            "scripted client factory; reaching the default factory means the "
-            "code path would have used real credentials."
+            f"(profile={profile!r}, region={region!r}, endpoint_url={endpoint_url!r}). "
+            "Tests must inject a scripted client factory, or be marked 'emulator' "
+            "and target a loopback endpoint; anything else would use real credentials."
         )
+
+    def loopback_only(real: Callable[..., Any]) -> Callable[..., Any]:
+        def build(profile: str, region: str, endpoint_url: str | None = None) -> Any:
+            if urlparse(endpoint_url or "").hostname not in _LOOPBACK_HOSTS:
+                refuse(profile, region, endpoint_url)
+            return real(profile, region, endpoint_url)
+
+        return build
 
     for name in _ADAPTERS_WITH_CLIENTS:
         module: Any = importlib.import_module(f"reality.adapters.{name}")
-        monkeypatch.setattr(module, "_default_client_factory", refuse)
+        guard = loopback_only(module._default_client_factory) if emulator else refuse
+        monkeypatch.setattr(module, "_default_client_factory", guard)
     yield

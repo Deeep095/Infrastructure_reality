@@ -103,7 +103,9 @@ DATA_PLANE_CAVEAT = (
 ClientFactory = Callable[[str], Any]
 
 
-def _default_client_factory(profile: str, region: str) -> ClientFactory:
+def _default_client_factory(
+    profile: str, region: str, endpoint_url: str | None = None
+) -> ClientFactory:
     """Build real clients from an explicitly selected profile and region.
 
     boto3 is imported here — inside the factory, never at module level —
@@ -113,7 +115,10 @@ def _default_client_factory(profile: str, region: str) -> ClientFactory:
     def create(service_name: str) -> Any:
         import boto3
 
-        return boto3.Session(profile_name=profile, region_name=region).client(service_name)
+        kwargs = {"endpoint_url": endpoint_url} if endpoint_url is not None else {}
+        return boto3.Session(profile_name=profile, region_name=region).client(
+            service_name, **kwargs
+        )
 
     return create
 
@@ -277,6 +282,7 @@ class CloudTrailAdapter(Adapter):
         *,
         profile: str | None = None,
         region: str | None = None,
+        endpoint_url: str | None = None,
         client_factory: ClientFactory | None = None,
         start: datetime | None = None,
         end: datetime | None = None,
@@ -325,7 +331,9 @@ class CloudTrailAdapter(Adapter):
             )
         self._profile = profile
         self._region = region
-        self._client_factory = client_factory or _default_client_factory(profile, region)
+        self._client_factory = client_factory or _default_client_factory(
+            profile, region, endpoint_url
+        )
         self._start = start
         self._end = end
 
@@ -346,6 +354,7 @@ class CloudTrailAdapter(Adapter):
         return cls(
             profile=profile,
             region=region,
+            endpoint_url=config.aws_endpoint_url,
             client_factory=client_factory,
             start=start,
             end=end,
@@ -609,6 +618,23 @@ class CloudTrailAdapter(Adapter):
                 source=EvidenceSource.CLOUDTRAIL,
                 status=CoverageStatus.AVAILABLE,
                 reason=f"{summary}; {DATA_PLANE_CAVEAT}",
+                region=self._region,
+            )
+        )
+        incomplete = [item for item in coverage if item.status is CoverageStatus.UNAVAILABLE]
+        coverage.append(
+            Coverage(
+                source=EvidenceSource.CLOUDTRAIL,
+                status=(CoverageStatus.UNAVAILABLE if incomplete else CoverageStatus.AVAILABLE),
+                reason=(
+                    f"CloudTrail event coverage: {len(events)} event record(s) examined; "
+                    f"{DATA_PLANE_CAVEAT}"
+                    + (
+                        "; incomplete: " + "; ".join(item.reason for item in incomplete)
+                        if incomplete
+                        else ""
+                    )
+                ),
                 region=self._region,
             )
         )

@@ -16,7 +16,7 @@ import pytest
 
 from reality import cli
 from reality.domain.enums import CoverageStatus
-from reality.services.impact import RiskLevel
+from reality.services.impact import Verdict
 from reality.services.scan import ScanReport, SourceReport
 
 FIXTURES = Path(__file__).resolve().parents[1] / "fixtures" / "terraform"
@@ -388,7 +388,10 @@ class TestReconcileCommand:
         assert (
             cli.main(["--database", str(database), "reconcile", "--output", output]) == cli.EXIT_OK
         )
-        assert capsys.readouterr().out.strip()
+        rendered = capsys.readouterr().out
+        assert rendered.strip()
+        if output == "table":
+            assert "\x1b[" not in rendered  # redirected output stays free of terminal escapes
 
 
 class TestResourceIdResolution:
@@ -502,39 +505,74 @@ class TestFailOn:
         assert cli.build_parser().parse_args(["simulate", "p.json"]).fail_on == cli.FailOn.NEVER
 
     @pytest.mark.parametrize(
-        ("risk", "threshold", "expected"),
+        ("verdict", "threshold", "expected"),
         [
-            (RiskLevel.HIGH, cli.FailOn.HIGH, cli.EXIT_POLICY),
-            (RiskLevel.HIGH, cli.FailOn.MEDIUM, cli.EXIT_POLICY),
-            (RiskLevel.MEDIUM, cli.FailOn.HIGH, cli.EXIT_OK),
-            (RiskLevel.MEDIUM, cli.FailOn.MEDIUM, cli.EXIT_POLICY),
-            (RiskLevel.LOW, cli.FailOn.MEDIUM, cli.EXIT_OK),
-            (RiskLevel.LOW, cli.FailOn.HIGH, cli.EXIT_OK),
-            (RiskLevel.HIGH, cli.FailOn.NEVER, cli.EXIT_OK),
-            (RiskLevel.LOW, cli.FailOn.NEVER, cli.EXIT_OK),
+            # undocumented: only proven drift trips it.
+            (Verdict.UNDOCUMENTED_DEPENDENTS, cli.FailOn.UNDOCUMENTED, cli.EXIT_POLICY),
+            (Verdict.INCONCLUSIVE, cli.FailOn.UNDOCUMENTED, cli.EXIT_OK),
+            (Verdict.DEPENDENTS_DOCUMENTED, cli.FailOn.UNDOCUMENTED, cli.EXIT_OK),
+            (Verdict.NO_DEPENDENTS_FOUND, cli.FailOn.UNDOCUMENTED, cli.EXIT_OK),
+            # inconclusive: drift, or any gap that stopped the question being answered.
+            (Verdict.UNDOCUMENTED_DEPENDENTS, cli.FailOn.INCONCLUSIVE, cli.EXIT_POLICY),
+            (Verdict.INCONCLUSIVE, cli.FailOn.INCONCLUSIVE, cli.EXIT_POLICY),
+            (Verdict.DEPENDENTS_DOCUMENTED, cli.FailOn.INCONCLUSIVE, cli.EXIT_OK),
+            (Verdict.NO_DEPENDENTS_FOUND, cli.FailOn.INCONCLUSIVE, cli.EXIT_OK),
+            # any-dependents: strictest; only a clean, fully covered result passes.
+            (Verdict.DEPENDENTS_DOCUMENTED, cli.FailOn.ANY_DEPENDENTS, cli.EXIT_POLICY),
+            (Verdict.NO_DEPENDENTS_FOUND, cli.FailOn.ANY_DEPENDENTS, cli.EXIT_OK),
+            # never: the default, and it never gates.
+            (Verdict.UNDOCUMENTED_DEPENDENTS, cli.FailOn.NEVER, cli.EXIT_OK),
+            (Verdict.NO_DEPENDENTS_FOUND, cli.FailOn.NEVER, cli.EXIT_OK),
         ],
     )
-    def test_threshold_comparison(self, risk: RiskLevel, threshold: str, expected: int) -> None:
-        assert cli._fail_on(risk, threshold) == expected
+    def test_threshold_comparison(self, verdict: Verdict, threshold: str, expected: int) -> None:
+        assert cli._fail_on(verdict, threshold) == expected
 
-    def test_high_risk_trips_the_gate_and_still_prints(
+    def test_no_verdict_never_trips_a_threshold(self) -> None:
+        # Nothing could be assessed, which is not a reassuring answer — but it
+        # is `--fail-on-unknown`'s job to care, not this threshold's.
+        assert cli._fail_on(None, cli.FailOn.ANY_DEPENDENTS) == cli.EXIT_OK
+
+    @pytest.mark.parametrize(
+        ("deprecated", "replacement"),
+        [("high", cli.FailOn.UNDOCUMENTED), ("medium", cli.FailOn.ANY_DEPENDENTS)],
+    )
+    def test_retired_risk_bands_still_parse_with_a_warning(
+        self,
+        deprecated: str,
+        replacement: str,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        # A pipeline written against the old risk bands keeps working; it is
+        # told what to switch to rather than failing on an unknown choice.
+        args = cli.build_parser().parse_args(["impact", "x", "--fail-on", deprecated])
+        assert args.fail_on == replacement
+        assert f"--fail-on {deprecated} is deprecated" in capsys.readouterr().err
+
+    def test_unknown_threshold_is_still_rejected(self) -> None:
+        with pytest.raises(SystemExit):
+            cli.build_parser().parse_args(["impact", "x", "--fail-on", "catastrophic"])
+
+    def test_drift_trips_the_gate_and_still_prints(
         self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
     ) -> None:
         database = tmp_path / "scan.db"
         cli.main(["--database", str(database), "scan", str(FIXTURES / "state.json")])
-        # MEDIUM is the documented result for this graph with no AWS coverage,
-        # so `medium` is the threshold that trips here.
+        # A local-only scan leaves every dependent unreconciled, so the verdict
+        # is INCONCLUSIVE: dependents exist but nothing can be concluded about
+        # them. That is the threshold that trips here, and `undocumented` — which
+        # needs proven drift — does not.
         subject = "aws_security_group.web_sg"
         assert (
-            cli.main(["--database", str(database), "impact", subject, "--fail-on", "medium"])
+            cli.main(["--database", str(database), "impact", subject, "--fail-on", "inconclusive"])
             == cli.EXIT_POLICY
         )
-        assert "risk: medium" in capsys.readouterr().out
+        assert "verdict:    inconclusive" in capsys.readouterr().out
         # Without the flag the same command still succeeds.
         assert cli.main(["--database", str(database), "impact", subject]) == cli.EXIT_OK
         capsys.readouterr()
         assert (
-            cli.main(["--database", str(database), "impact", subject, "--fail-on", "high"])
+            cli.main(["--database", str(database), "impact", subject, "--fail-on", "undocumented"])
             == cli.EXIT_OK
         )
 

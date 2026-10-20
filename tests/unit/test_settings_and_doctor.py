@@ -8,8 +8,8 @@ calls they did not ask for, with nothing in their command line to show why.
 
 from __future__ import annotations
 
-import importlib.util
 import json
+import sys
 from pathlib import Path
 
 import pytest
@@ -24,6 +24,7 @@ from reality.settings import (
     ENV_REGION,
     SettingsError,
     UserSettings,
+    _aws_checks,
     config_path,
     load_settings,
     resolve_setting,
@@ -303,18 +304,112 @@ def test_configured_profile_lets_aws_work_from_one_flag(
     )
 
 
+# --- emulator endpoint ----------------------------------------------------------
+
+EMULATOR = "http://127.0.0.1:5000"
+
+
+class _RecordingBoto3:
+    """Stands in for boto3: records every client it is asked for, opens no socket."""
+
+    def __init__(self) -> None:
+        self.clients: list[tuple[str, dict[str, object], dict[str, object]]] = []
+
+    def Session(self, **session_kwargs: object) -> object:  # mirrors boto3.Session
+        recorder = self
+
+        class _Session:
+            def client(self, service: str, **client_kwargs: object) -> object:
+                recorder.clients.append((service, session_kwargs, client_kwargs))
+                return _FakeSts()
+
+        return _Session()
+
+
+class _FakeSts:
+    def get_caller_identity(self) -> dict[str, str]:
+        return {"Account": "123456789012", "Arn": "arn:aws:iam::123456789012:user/emulator"}
+
+
+def test_endpoint_url_flag_reaches_the_config(
+    settings_file: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    seen: dict[str, object] = {}
+
+    class StubService:
+        @classmethod
+        def from_config(cls, config, store, **kwargs):  # type: ignore[no-untyped-def]
+            seen["config"] = config
+            return cls()
+
+        def run(self, paths):  # type: ignore[no-untyped-def]
+            return ScanReport(scan_run_id=1)
+
+    monkeypatch.setattr(cli, "ScanService", StubService)
+    argv = ["scan", str(STATE), "--aws", "--profile", "emulator", "--region", "eu-west-1"]
+    argv += ["--endpoint-url", EMULATOR, "--database", str(tmp_path / "scan.db")]
+    assert cli.main(argv) == cli.EXIT_OK
+    config = seen["config"]
+    assert isinstance(config, RealityConfig)
+    assert config.aws_endpoint_url == EMULATOR
+
+
+@pytest.mark.emulator
+def test_every_aws_client_is_built_against_the_endpoint(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A client that skipped the endpoint would read the real account instead.
+
+    Marked ``emulator`` so the real factories run; boto3 itself is replaced by
+    a recorder, so nothing is sent anywhere.
+    """
+    from datetime import UTC, datetime, timedelta
+
+    from reality.adapters.aws_resources import AwsResourcesAdapter
+    from reality.adapters.cloudtrail import CloudTrailAdapter
+    from reality.adapters.iam import IamAdapter
+
+    fake = _RecordingBoto3()
+    monkeypatch.setitem(sys.modules, "boto3", fake)
+    config = RealityConfig(
+        aws_opt_in=True, aws_profile="emulator", aws_region="eu-west-1", aws_endpoint_url=EMULATOR
+    )
+    end = datetime(2026, 10, 1, tzinfo=UTC)
+    adapters = (
+        AwsResourcesAdapter.from_config(config),
+        IamAdapter.from_config(config),
+        CloudTrailAdapter.from_config(config, start=end - timedelta(days=1), end=end),
+    )
+    for adapter in adapters:
+        adapter._client_factory("sts")
+    assert len(fake.clients) == 3
+    for _, session_kwargs, client_kwargs in fake.clients:
+        assert session_kwargs == {"profile_name": "emulator", "region_name": "eu-west-1"}
+        assert client_kwargs == {"endpoint_url": EMULATOR}
+
+
+def test_doctor_checks_the_emulator_not_aws(monkeypatch: pytest.MonkeyPatch) -> None:
+    fake = _RecordingBoto3()
+    monkeypatch.setitem(sys.modules, "boto3", fake)
+    checks = _aws_checks(opt_in=True, profile="emulator", region="eu-west-1", endpoint_url=EMULATOR)
+    session = {"profile_name": "emulator", "region_name": "eu-west-1"}
+    assert fake.clients == [("sts", session, {"endpoint_url": EMULATOR})]
+    assert checks[0].status == "ok"
+    assert f"via emulator {EMULATOR}" in checks[0].detail
+
+
 def test_missing_boto3_is_an_install_hint_not_a_traceback(
-    settings_file: Path, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    settings_file: Path,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """`--aws` without the extra should say how to fix it, not crash.
 
     boto3 is imported lazily inside the adapters, so without the guard in
     ``require_aws`` a missing extra surfaces as an ImportError traceback from
-    three frames down. This only runs where boto3 is absent, which is exactly
-    the offline/CI-without-extras configuration the guard is for.
+    three frames down. The test isolates the optional module rather than
+    depending on whether the test environment has the AWS extra installed.
     """
-    if importlib.util.find_spec("boto3") is not None:
-        pytest.skip("boto3 is installed; the missing-extra path is unreachable")
+    monkeypatch.setitem(sys.modules, "boto3", None)
     save_settings(UserSettings(profile="sandbox", region="eu-west-1"), settings_file)
     code = cli.main(["--aws", "scan", str(STATE), "--database", str(tmp_path / "scan.db")])
     err = capsys.readouterr().err

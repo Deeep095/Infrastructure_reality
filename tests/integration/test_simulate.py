@@ -26,7 +26,7 @@ from reality import cli
 from reality.adapters.aws_resources import AwsResourcesAdapter
 from reality.domain.enums import ChangeAction, EvidenceSource, ResourceType
 from reality.domain.models import Resource, TerraformChange
-from reality.services.impact import Assessment, DependentKind, RiskLevel, SimulateService
+from reality.services.impact import Assessment, DependentKind, SimulateService, Verdict
 from reality.services.reconcile import ReconcileService
 from reality.services.reports import stable_json
 from reality.services.scan import ScanService
@@ -220,22 +220,25 @@ def test_multiple_targets_replacement_and_documented_dependents(
     assert web.actions == (ChangeAction.REPLACE,)
     assert web.resolved
     assert web.canonical_id == TF_WEB
-    assert web.risk is RiskLevel.LOW
+    assert web.verdict is Verdict.NO_DEPENDENTS_FOUND
     assert web.dependents == ()
 
     # The security group carries two declared dependents (the instance and the
-    # database, both DECLARED_ONLY after reconciliation) -> MEDIUM, not HIGH.
+    # database, both DECLARED_ONLY after reconciliation): every dependent is
+    # accounted for, so this is not drift.
     assert web_sg.resolved
     assert web_sg.canonical_id == TF_WEB_SG
-    assert web_sg.risk is RiskLevel.MEDIUM
+    assert web_sg.verdict is Verdict.DEPENDENTS_DOCUMENTED
     kinds = {dependent.canonical_id: dependent.kind for dependent in web_sg.dependents}
     assert kinds == {TF_WEB: DependentKind.DOCUMENTED, TF_PRIMARY: DependentKind.DOCUMENTED}
     assert all(dependent.provenance == ("terraform_declared",) for dependent in web_sg.dependents)
 
-    assert report.risk is RiskLevel.MEDIUM  # the highest target risk
+    assert report.verdict is Verdict.DEPENDENTS_DOCUMENTED  # most cautionary target
 
 
-def test_undocumented_dependent_makes_the_target_high(scanned: ScanStore, tmp_path: Path) -> None:
+def test_undocumented_dependent_drives_the_target_verdict(
+    scanned: ScanStore, tmp_path: Path
+) -> None:
     # Resolve the plan address to the *observed* security group: the stored
     # address mapping is one of the two places a cross-world identity may
     # live (identity mappings are the other).
@@ -248,18 +251,18 @@ def test_undocumented_dependent_makes_the_target_high(scanned: ScanStore, tmp_pa
     (target,) = report.targets
     assert target.resolved
     assert target.canonical_id == DB_SG
-    assert target.risk is RiskLevel.HIGH
+    assert target.verdict is Verdict.UNDOCUMENTED_DEPENDENTS
     kinds = {dependent.canonical_id: dependent.kind for dependent in target.dependents}
     # The batch instance's attachment is observed but undeclared: the declared
     # aws_instance.batch names sg-0undeclared, which resolves to nothing, so the
     # observed attachment to sg-0bbb222 has no declaration to join. One
-    # undocumented dependent is enough for HIGH.
+    # undocumented dependent is enough to carry the whole verdict.
     assert kinds == {BATCH: DependentKind.UNDOCUMENTED}
     batch = next(dependent for dependent in target.dependents if dependent.canonical_id == BATCH)
     assert batch.path == (DB_SG, BATCH)
     assert batch.provenance == ("aws_observed",)
     assert batch.evidence_ids
-    assert report.risk is RiskLevel.HIGH  # the one undocumented dependent is enough
+    assert report.verdict is Verdict.UNDOCUMENTED_DEPENDENTS  # one is enough
 
 
 def test_unresolved_address_is_reported_not_guessed(scanned: ScanStore, tmp_path: Path) -> None:
@@ -269,7 +272,7 @@ def test_unresolved_address_is_reported_not_guessed(scanned: ScanStore, tmp_path
     (target,) = report.targets
     assert not target.resolved
     assert target.canonical_id is None
-    assert target.risk is None  # unknown, never fabricated
+    assert target.verdict is None  # not assessed, never fabricated
     assert target.dependents == ()
     assert "blast radius not computed" in target.notes[0]
     assert any("could not be resolved" in note for note in report.notes)
@@ -284,9 +287,9 @@ def test_plan_without_destructive_targets_has_nothing_to_simulate(
     report = SimulateService(scanned).run(plan)
 
     assert report.targets == ()
-    # No destructive targets means nothing was assessed — which is not the
-    # same as a low risk.
-    assert report.risk is None
+    # No destructive targets means nothing was assessed - which is not the
+    # same as a reassuring verdict.
+    assert report.verdict is None
     assert report.assessment is Assessment.NOT_APPLICABLE
     assert "no delete or replace targets" in report.notes[0]
 
@@ -295,13 +298,13 @@ def test_unresolved_target_makes_the_assessment_incomplete(
     scanned: ScanStore, tmp_path: Path
 ) -> None:
     # A delete target that resolves to nothing must not be reported as a clean
-    # low-risk plan: the assessment simply did not complete.
+    # plan: the assessment simply did not complete.
     plan = write_plan(tmp_path, change("aws_instance.ghost", "aws_instance", "delete"))
     report = SimulateService(scanned).run(plan)
 
     assert len(report.targets) == 1
     assert not report.targets[0].resolved
-    assert report.risk is None
+    assert report.verdict is None
     assert report.assessment is Assessment.INCOMPLETE
 
 
@@ -329,9 +332,9 @@ def test_fail_on_unknown_passes_a_complete_assessment(
     assert "assessment: complete" in capsys.readouterr().out
 
 
-def test_unknown_coverage_keeps_the_floor_at_medium(tmp_path: Path) -> None:
+def test_unknown_coverage_keeps_the_verdict_inconclusive(tmp_path: Path) -> None:
     # A database with a mapped resource but no scan coverage at all: no
-    # dependent can be ruled out, so LOW is forbidden.
+    # dependent can be ruled out, so a clean verdict is forbidden.
     conn = connect(tmp_path / "fresh.db")
     migrate(conn)
     store = ScanStore(conn)
@@ -346,7 +349,7 @@ def test_unknown_coverage_keeps_the_floor_at_medium(tmp_path: Path) -> None:
 
     (target,) = report.targets
     assert target.resolved
-    assert target.risk is RiskLevel.MEDIUM
+    assert target.verdict is Verdict.INCONCLUSIVE
     assert target.dependents == ()
     assert any("coverage" in note for note in target.notes)
 
@@ -367,11 +370,20 @@ def test_report_json_is_stable_across_runs(scanned: ScanStore, tmp_path: Path) -
     assert stable_json(first) == stable_json(second)
     assert "computed_at" not in stable_json(first)  # no timestamps: stable by construction
     parsed = json.loads(stable_json(first))
-    assert set(parsed) == {"plan_path", "depth", "risk", "assessment", "targets", "notes"}
+    assert set(parsed) == {
+        "plan_path",
+        "depth",
+        "verdict",
+        "assessment",
+        "counts",
+        "targets",
+        "notes",
+    }
     web_sg = next(target for target in parsed["targets"] if target["resolved"])
-    # Both of this group's dependents are now CONFIRMED, so the band is MEDIUM:
-    # known dependents, nothing undocumented. HIGH needs an undocumented one.
-    assert web_sg["risk"] == "medium"
+    # Both of this group's dependents are now CONFIRMED, so every dependent is
+    # accounted for. Drift would need one with no declaration behind it.
+    assert web_sg["verdict"] == "dependents_documented"
+    assert web_sg["counts"]["undocumented"] == 0
     assert web_sg["dependents"]
     for dependent in web_sg["dependents"]:
         assert set(dependent) == {
@@ -450,7 +462,7 @@ def test_simulate_writes_nothing_to_the_database(scanned: ScanStore, tmp_path: P
 # --- the CLI command --------------------------------------------------------------------
 
 
-def test_cli_simulate_reports_risk_in_plain_text(
+def test_cli_simulate_reports_the_verdict_in_plain_text(
     scanned: ScanStore, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     plan = write_plan(tmp_path, change("aws_instance.web", "aws_instance", "delete"))
@@ -459,7 +471,8 @@ def test_cli_simulate_reports_risk_in_plain_text(
     out = capsys.readouterr().out
     assert out.startswith(f"reality: simulate {plan}")
     assert "read-only; the plan is never applied" in out
-    assert "overall risk: low" in out
+    assert "verdict:    no_dependents_found" in out
+    assert "no dependents, and every relevant source was consulted" in out
     assert f"aws_instance.web [delete] -> {TF_WEB}" in out
 
 
@@ -473,7 +486,7 @@ def test_cli_simulate_json_is_parseable(
     )
     assert exit_code == cli.EXIT_OK
     parsed = json.loads(capsys.readouterr().out)
-    assert parsed["risk"] == "medium"
+    assert parsed["verdict"] == "dependents_documented"
     (target,) = parsed["targets"]
     assert target["canonical_id"] == WEB_SG
     assert {dependent["canonical_id"] for dependent in target["dependents"]} == {WEB, RDS_PRIMARY}

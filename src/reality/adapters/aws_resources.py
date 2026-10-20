@@ -95,7 +95,9 @@ UNAVAILABLE_CODES: frozenset[str] = frozenset(
 ClientFactory = Callable[[str], Any]
 
 
-def _default_client_factory(profile: str, region: str) -> ClientFactory:
+def _default_client_factory(
+    profile: str, region: str, endpoint_url: str | None = None
+) -> ClientFactory:
     """Build real clients from an explicitly selected profile and region.
 
     boto3 is imported here — inside the factory, never at module level —
@@ -105,7 +107,10 @@ def _default_client_factory(profile: str, region: str) -> ClientFactory:
     def create(service_name: str) -> Any:
         import boto3
 
-        return boto3.Session(profile_name=profile, region_name=region).client(service_name)
+        kwargs = {"endpoint_url": endpoint_url} if endpoint_url is not None else {}
+        return boto3.Session(profile_name=profile, region_name=region).client(
+            service_name, **kwargs
+        )
 
     return create
 
@@ -191,6 +196,7 @@ class AwsResourcesAdapter(Adapter):
         *,
         profile: str,
         region: str,
+        endpoint_url: str | None = None,
         client_factory: ClientFactory | None = None,
     ) -> None:
         # The explicit profile/region gate comes before anything else: no
@@ -207,8 +213,9 @@ class AwsResourcesAdapter(Adapter):
             )
         self._profile = profile
         self._region = region
+        self._endpoint_url = endpoint_url
         self._client_factory: ClientFactory = client_factory or _default_client_factory(
-            profile, region
+            profile, region, endpoint_url
         )
 
     @classmethod
@@ -221,7 +228,12 @@ class AwsResourcesAdapter(Adapter):
         region = config.aws_region
         if profile is None or region is None:  # pragma: no cover - require_aws rejects this
             raise ConfigError("require_aws() must run before building the adapter")
-        return cls(profile=profile, region=region, client_factory=client_factory)
+        return cls(
+            profile=profile,
+            region=region,
+            endpoint_url=config.aws_endpoint_url,
+            client_factory=client_factory,
+        )
 
     # --- entry point --------------------------------------------------------
 
@@ -242,6 +254,7 @@ class AwsResourcesAdapter(Adapter):
                 region=self._region,
             )
         ]
+        service_coverage: list[Coverage] = []
         for label, run in (
             ("ec2 DescribeInstances", self._scan_instances),
             ("ec2 DescribeSecurityGroups", self._scan_security_groups),
@@ -254,6 +267,26 @@ class AwsResourcesAdapter(Adapter):
             relationships.extend(outcome.relationships)
             evidence.extend(outcome.evidence)
             coverage.append(outcome.coverage)
+            service_coverage.append(outcome.coverage)
+        unavailable = [
+            item for item in service_coverage if item.status is not CoverageStatus.AVAILABLE
+        ]
+        coverage.append(
+            Coverage(
+                source=EvidenceSource.AWS_RESOURCES,
+                status=(CoverageStatus.UNAVAILABLE if unavailable else CoverageStatus.AVAILABLE),
+                reason=(
+                    f"AWS resource collection: {len(service_coverage) - len(unavailable)}/"
+                    f"{len(service_coverage)} service queries complete"
+                    + (
+                        "; incomplete: " + "; ".join(item.reason for item in unavailable)
+                        if unavailable
+                        else ""
+                    )
+                ),
+                region=self._region,
+            )
+        )
         return AdapterResult(
             resources=tuple(resources),
             relationships=tuple(relationships),
@@ -453,7 +486,7 @@ class AwsResourcesAdapter(Adapter):
                         source_ref=function_name,
                         target=target,
                         target_ref=role,
-                        relationship_type=RelationshipType.PERMISSION_ON,
+                        relationship_type=RelationshipType.USES_ROLE,
                         service="lambda",
                         operation="ListFunctions",
                         attribute="Role",

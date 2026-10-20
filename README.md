@@ -1,4 +1,3 @@
-
 # reality
 
 Read-only cloud infrastructure discovery and local blast-radius simulation.
@@ -24,8 +23,20 @@ The core ideas:
 - **AWS is strictly opt-in.** No default profile, no default region. AWS
   adapters run only with the explicit `--aws --profile PROFILE --region REGION`
   triple; a partial selection is an error, not a fallback to local-only.
-- **Risk is documented, not scored.** Blast radius is reported as HIGH /
-  MEDIUM / LOW bands with the reasoning attached, never as a fabricated number.
+- **Impact bands are rules, not risk scores.** `high` means at least one
+  undocumented dependent; `medium` means known dependents or incomplete
+  coverage; `low` means no known dependents with the required coverage. These
+  bands do not estimate likelihood, business impact, or safety to change.
+- **Authorization is not usage.** IAM `permission_on` candidates describe
+  policy grants, not runtime dependencies. They remain visible in reconciliation
+  as `possible`; impact traversal excludes policy-only edges.
+
+This is a deliberately narrow prototype, not a full AWS inventory. AWS
+collection currently covers EC2 instances/security groups, Lambda functions,
+RDS DB instances, S3 bucket names, IAM role policies, and bounded CloudTrail
+management events in one selected region (with global IAM/S3 calls). The
+relationship graph contains only the fields these adapters explicitly extract;
+absence from a report does not mean a resource or dependency is absent from AWS.
 
 ## Install
 
@@ -62,8 +73,9 @@ demo: wrote ...\demo.db from recorded responses (no AWS call was made)
 The builder replays the API responses recorded under `tests/fixtures/` through the
 real adapters, so this is the actual code path — not a hand-written database. No
 credentials are read, no request is made, and the Terraform executable is never
-invoked. The counts are the point: 6 confirmed (both worlds agree, joined through
-an identity mapping rather than a name), **4 undocumented** (observed in the
+invoked. The counts are the point: 6 confirmed (3 dependencies both worlds agree
+on, each recorded once per side, joined through an identity mapping rather than
+a name), **4 undocumented** (observed in the
 cloud, with no declaration accounting for them), 8 possible (a permission with no
 observed usage behind it), and 5 `declared_only` — one world only, so no verdict
 is claimed. Every conclusion is listed, so the tally always equals the number of
@@ -88,7 +100,7 @@ reality: why aws/ec2/instance/eu-west-1/123456789012/i-0web
 
 $ python -m reality --database demo.db impact aws:iam/role:123456789012:cleanup_role --fail-on high
 reality: impact of aws/iam/role/-/123456789012/cleanup_role (basis discovery_graph, depth 3)
-  risk: high
+  risk: high (at least one undocumented dependent; rule-based, not a score)
   dependents (1):
     - aws/lambda/function/eu-west-1/123456789012/cleanup (depth 1, undocumented)
         path: aws/lambda/function/eu-west-1/123456789012/cleanup -> aws/iam/role/-/123456789012/cleanup_role
@@ -99,7 +111,7 @@ $ echo $?
 ```
 
 Read those two findings together — they are the whole product in four lines. The
-declared `aws_instance.web` and the observed `i-0web` are the *same* instance,
+declared `aws_instance.web` and the observed `i-0web` are the _same_ instance,
 joined because the state's ARN names `i-0web` and AWS reports `i-0web`; that
 attachment is `confirmed`. The second attachment, to `sg-0zzz999`, has no
 declaration anywhere and no mapping can reach it, so it is `undocumented` — a live
@@ -255,7 +267,7 @@ a typo should not look like a missing file.
 settings field. A saved profile is a preference, not a request to read AWS — so
 `reality --aws scan` works with a configured profile, while a plain
 `reality scan` never contacts AWS no matter how the file is set up. Typing
-`--profile` or `--region` *without* `--aws` is an error (exit `4`), because that
+`--profile` or `--region` _without_ `--aws` is an error (exit `4`), because that
 would be an AWS-shaped command with AWS-shaped intent and no opt-in.
 
 ### doctor
@@ -295,21 +307,21 @@ $ reality doctor --aws --profile deepanshu --region us-east-1
 Without `--aws`, it reports the opt-in state and stops: a diagnostic that quietly
 reached the network would undercut the guarantee the other commands make.
 `doctor` is also the one command that survives a broken settings file rather than
-refusing to start, because it is the command you run *because* something is
+refusing to start, because it is the command you run _because_ something is
 broken. It exits `1` if any check fails.
 
 ## Commands
 
-| Command | What it does |
-|---|---|
-| `reality scan [TFJSON …]` | Parse local `terraform show -json` state/plan exports into the database; with the AWS opt-in triple, also discover live resources (EC2, Lambda, RDS, S3, security groups), IAM role permissions, and CloudTrail usage |
-| `reality reconcile [--scan-run N] [--verbose] [--fail-on LEVEL] [--conclusion LEVEL] [--output FORMAT]` | Compare the declared and observed worlds and store a conclusion per relationship candidate: `confirmed`, `undocumented`, `possible`, `declared_only`, or `unknown` with the missing coverage named. Idempotent — re-running replaces the same rows |
-| `reality why RESOURCE` | Show one resource with its relationships, evidence, findings, and coverage limitations |
-| `reality impact RESOURCE [--depth N] [--fail-on LEVEL] [--json]` | Reverse-traverse stored relationships to report the blast radius of a resource |
-| `reality simulate PLAN_JSON [--depth N] [--fail-on LEVEL] [--json]` | Select the delete/replace targets of an exported plan and report each one's blast radius; the plan is parsed, never applied |
-| `reality graph RESOURCE [--depth N] [--direction incoming\|outgoing] [--output text\|dot\|mermaid] [--include-unresolved]` | Export a subgraph as Mermaid, DOT, or text. Default direction is `incoming` (dependents/blast radius) |
-| `reality config [show \| path \| init]` | Show effective settings with their source, print the settings-file path, or write one |
-| `reality doctor [--aws …]` | Report on the environment; optionally verify AWS credentials when explicitly opted in |
+| Command                                                                                                                    | What it does                                                                                                                                                                                                                                       |
+| -------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `reality scan [TFJSON …]`                                                                                                  | Parse local `terraform show -json` state/plan exports into the database; with the AWS opt-in triple, also discover live resources (EC2, Lambda, RDS, S3, security groups), IAM role permissions, and CloudTrail usage                              |
+| `reality reconcile [--scan-run N] [--verbose] [--fail-on LEVEL] [--conclusion LEVEL] [--output FORMAT]`                    | Compare the declared and observed worlds and store a conclusion per relationship candidate: `confirmed`, `undocumented`, `possible`, `declared_only`, or `unknown` with the missing coverage named. Idempotent — re-running replaces the same rows |
+| `reality why RESOURCE`                                                                                                     | Show one resource with its relationships, evidence, findings, and coverage limitations                                                                                                                                                             |
+| `reality impact RESOURCE [--depth N] [--fail-on LEVEL] [--json]`                                                           | Reverse-traverse declared/observed dependents; IAM policy grants are excluded because they do not prove runtime use                                                                                                                                |
+| `reality simulate PLAN_JSON [--depth N] [--fail-on LEVEL] [--json]`                                                        | Select the delete/replace targets of an exported plan and report each one's blast radius; the plan is parsed, never applied                                                                                                                        |
+| `reality graph RESOURCE [--depth N] [--direction incoming\|outgoing] [--output text\|dot\|mermaid] [--include-unresolved]` | Export a subgraph as Mermaid, DOT, or text. Default direction is `incoming` (dependents/blast radius)                                                                                                                                              |
+| `reality config [show \| path \| init]`                                                                                    | Show effective settings with their source, print the settings-file path, or write one                                                                                                                                                              |
+| `reality doctor [--aws …]`                                                                                                 | Report on the environment; optionally verify AWS credentials when explicitly opted in                                                                                                                                                              |
 
 `RESOURCE` may be a full canonical ID, a Terraform address
 (`aws_security_group.web_sg`), an ARN, a native ID, or the short display form
@@ -349,8 +361,9 @@ unknown resource, or a plan the database has never seen) · `6` the `--fail-on`
 threshold was met · `130` interrupted or cancelled (`Ctrl-C`, or a progress
 reporter that cancels).
 
-`--fail-on {never,medium,high}` (default `never`) turns the risk band into a
-CI verdict. The report is always printed regardless; only the exit code gates:
+`--fail-on {never,medium,high}` (default `never`) turns the rule-based impact
+review band into a CI verdict. These bands are not calibrated risk scores. The
+report is always printed regardless; only the exit code gates:
 
 ```bash
 reality --database demo.db impact aws:iam/role:123456789012:cleanup_role --fail-on high || exit 1
@@ -417,7 +430,7 @@ reality --database demo.db reconcile --fail-on undocumented || exit 1
 # Show only undocumented findings
 reality --database demo.db reconcile --conclusion undocumented
 
-# Fail if any high-risk blast radius exists
+# Fail if impact finds an undocumented dependent
 reality --database demo.db impact aws_security_group.web_sg --fail-on high || exit 1
 ```
 
@@ -448,6 +461,95 @@ The test suite runs entirely offline: AWS-facing tests use scripted fake
 clients (plus one botocore `Stubber` test that skips cleanly when boto3 is not
 installed), Terraform input is pre-exported fixture JSON, and CI pins dummy
 AWS environment variables to prove nothing needs real credentials.
+
+## Testing against a local AWS emulator
+
+Between the offline fixtures and a real account sits an emulator: real boto3
+requests over HTTP, against `moto_server` or LocalStack on this machine.
+`--endpoint-url` sends every AWS call `reality` makes (and `doctor`'s STS
+check) to that endpoint instead of AWS.
+
+### LocalStack with Docker Desktop
+
+Docker Desktop is the recommended repeatable setup on Windows. Start the
+LocalStack container from the repository root:
+
+```powershell
+docker compose -f docker-compose.localstack.yml up -d
+docker compose -f docker-compose.localstack.yml ps
+```
+
+The complete seed includes an RDS instance. LocalStack exposes RDS creation as
+a Pro feature, so set `LOCALSTACK_AUTH_TOKEN` in the shell before starting the
+container if you have a LocalStack token. Without a token, use the documented
+Moto setup below for the complete no-license world; LocalStack can still be
+used for the services its community image supports.
+
+Seed a fresh emulated account and write its Terraform state plus throwaway
+credentials under `.emulator/`:
+
+```powershell
+& .\.venv\Scripts\python.exe scripts\seed_emulator.py `
+  --endpoint-url http://127.0.0.1:4566 `
+  --region eu-west-1 `
+  --out-dir .\.emulator
+```
+
+Point boto3 at those credentials, then scan the emulated AWS account and the
+generated Terraform state together:
+
+```powershell
+$env:AWS_CONFIG_FILE = "$PWD\.emulator\aws\config"
+$env:AWS_SHARED_CREDENTIALS_FILE = "$PWD\.emulator\aws\credentials"
+
+& .\.venv\Scripts\python.exe -m reality scan `
+  --database .\.emulator\localstack.db `
+  .\.emulator\state.json `
+  --aws --profile emulator --region eu-west-1 `
+  --endpoint-url http://127.0.0.1:4566
+
+& .\.venv\Scripts\python.exe -m reality reconcile `
+  --database .\.emulator\localstack.db --output table
+```
+
+The seed is deliberately local-only and uses dummy credentials. To reset the
+container and its generated world:
+
+```powershell
+docker compose -f docker-compose.localstack.yml down -v
+Remove-Item -Recurse -Force .\.emulator -ErrorAction SilentlyContinue
+```
+
+```bash
+pip install "moto[server]"
+moto_server -p 5000                                    # leave running
+
+python scripts/seed_emulator.py --endpoint-url http://127.0.0.1:5000
+```
+
+The seeder refuses any non-loopback endpoint and signs with dummy credentials.
+It creates a small world (an instance on two security groups, an RDS instance,
+two Lambda functions with their roles, a bucket), writes
+`.emulator/state.json` declaring only part of it, writes a throwaway
+`emulator` profile under `.emulator/aws/`, and prints the scan and reconcile
+commands to run next. Your own `~/.aws` files are never read.
+
+Expected: 3 dependencies `confirmed` (6 findings: one per side), 2
+`undocumented` (the hand-added `legacy-ops-sg` and the undeclared `cleanup`
+function's role), `declared_only` for the `depends_on` edge no API reports,
+`possible` for the roles' S3 grants, and nothing `unknown`. moto does not
+implement CloudTrail `LookupEvents`, so leave the CloudTrail flags off; that
+costs nothing here, because a grant is `possible` with or without CloudTrail
+(management events never show data-plane usage).
+
+Run the scan before `reconcile` — the database does not exist until the scan
+writes it, and the two `AWS_*` variables must be set in the same shell.
+
+The same flow runs as an opt-in test, skipped unless the variable is set:
+
+```bash
+REALITY_EMULATOR_ENDPOINT=http://127.0.0.1:5000 python -m pytest tests/integration/test_emulator.py
+```
 
 ## Testing against a real AWS account
 
@@ -613,9 +715,10 @@ reality --database reality.db impact sg-0abc123 --output json > impact.json
 reality --database reality.db impact sg-0abc123 --output table
 ```
 
-Expected: `risk: high|medium|low`, each dependent with its `depth`, the `path:`
-from dependent to subject, provenance, and evidence. Verify the path really does
-lead to the subject and the risk band matches the fan-out you see.
+Expected: a rule-based review band, each dependent with its `depth`, the
+`path:` from dependent to subject, provenance, and evidence. `high` means at
+least one dependent is undocumented; it is not a measure of fan-out. Verify the
+path and the conclusion against the evidence.
 
 The CI gate — the report still prints; only the exit code changes:
 

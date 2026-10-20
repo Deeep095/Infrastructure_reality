@@ -342,7 +342,9 @@ def test_file_mode_counts_are_exact() -> None:
     result = parse_fixture()
     assert len(result.evidence) == 4
     assert len(result.relationships) == 1
-    assert len(result.coverage) == 2  # available summary + malformed-embedded record
+    assert len(result.coverage) == 3  # event summary, parse issue, incomplete aggregate
+    assert result.coverage[-1].status is CoverageStatus.UNAVAILABLE
+    assert "malformed embedded" in result.coverage[-1].reason
     assert result.resources == ()  # evidence only; resources come from other adapters
 
 

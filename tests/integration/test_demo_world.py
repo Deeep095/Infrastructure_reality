@@ -13,8 +13,9 @@ What is asserted, and why each one is the point of the demo:
    conclusion that required an identity mapping, not a name match.
 2. At least one ``undocumented`` conclusion exists: something observed in the
    cloud that no Terraform declaration accounts for. This is the headline.
-3. A resource whose dependents include an ``undocumented`` one reports HIGH
-   risk, and ``--fail-on high`` turns that into exit 6 — the CI gate.
+3. A resource whose dependents include an ``undocumented`` one reports the
+   ``undocumented_dependents`` verdict, and ``--fail-on undocumented`` turns
+   that into exit 6 — the CI gate.
 4. ``--fail-on`` stays out of the way by default, and never fires on a report
    that is merely unverifiable.
 5. A native ID shared by both worlds is ambiguous, and the CLI refuses to
@@ -36,7 +37,7 @@ import pytest
 
 from reality import cli
 from reality.domain.enums import Conclusion, RelationshipType
-from reality.services.impact import RiskLevel
+from reality.services.impact import Verdict
 from reality.services.reconcile import finding_id
 
 REPO = Path(__file__).resolve().parents[2]
@@ -125,22 +126,36 @@ def test_a_hidden_dependency_is_demonstrated(demo: Path) -> None:
     assert finding["evidence_ids"]
 
 
-def test_hidden_dependency_drives_high_risk(demo: Path, capsys: pytest.CaptureFixture[str]) -> None:
+def test_hidden_dependency_drives_the_verdict(
+    demo: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
     assert cli.main(["--database", str(demo), "impact", OBSERVED_CLEANUP_ROLE, "--json"]) == (
         cli.EXIT_OK
     )
     report = json.loads(capsys.readouterr().out)
-    assert report["risk"] == RiskLevel.HIGH.value
+    assert report["verdict"] == Verdict.UNDOCUMENTED_DEPENDENTS.value
+    assert report["counts"]["undocumented"] >= 1
     assert any(dependent["kind"] == "undocumented" for dependent in report["dependents"])
 
 
-def test_fail_on_high_gates_the_build(demo: Path, capsys: pytest.CaptureFixture[str]) -> None:
+def test_fail_on_undocumented_gates_the_build(
+    demo: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
     # The report is printed either way; only the exit code carries the verdict.
     assert (
-        cli.main(["--database", str(demo), "impact", OBSERVED_CLEANUP_ROLE, "--fail-on", "high"])
+        cli.main(
+            [
+                "--database",
+                str(demo),
+                "impact",
+                OBSERVED_CLEANUP_ROLE,
+                "--fail-on",
+                "undocumented",
+            ]
+        )
         == cli.EXIT_POLICY
     )
-    assert "risk: high" in capsys.readouterr().out
+    assert "verdict:    undocumented_dependents" in capsys.readouterr().out
     # And the default leaves the decision to the caller.
     assert cli.main(["--database", str(demo), "impact", OBSERVED_CLEANUP_ROLE]) == cli.EXIT_OK
     capsys.readouterr()
@@ -176,6 +191,32 @@ def test_every_conclusion_is_reported_and_the_tally_adds_up(demo: Path) -> None:
     assert counts[Conclusion.UNKNOWN.value] == 0
 
 
+@pytest.mark.parametrize("output", ["text", "table"])
+def test_row_counts_match_the_comparison_rows(
+    demo: Path, capsys: pytest.CaptureFixture[str], output: str
+) -> None:
+    # A confirmed dependency is one comparison row but one finding per side,
+    # so the 6 confirmed findings are 3 rows. The report must say so instead
+    # of printing "6" beside three visible confirmed rows.
+    if output == "table":
+        pytest.importorskip("rich")
+    assert cli.main(["--database", str(demo), "reconcile", "--output", output]) == cli.EXIT_OK
+    rendered = capsys.readouterr().out
+    # rich wraps at the console width, so compare with whitespace collapsed.
+    assert "one finding per side" in " ".join(rendered.split())
+    if output == "text":
+        assert "shown below as 20 dependencies" in rendered
+    else:
+        assert "Dependencies: 20" in rendered
+        # The counts-table row: | confirmed | rows | findings | means |
+        confirmed = next(
+            tokens
+            for tokens in (line.split() for line in rendered.splitlines())
+            if tokens[1:2] == ["confirmed"]
+        )
+        assert (confirmed[3], confirmed[5]) == ("3", "6")
+
+
 def test_reconcile_is_idempotent_over_the_demo_world(
     demo: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -195,8 +236,8 @@ def test_a_less_qualified_reference_reaches_the_stored_resource(
     The scan stores the bucket as ``aws/s3/bucket/-/123456789012/data-lake``
     while the edges that reference it were recorded as
     ``aws/s3/bucket/-/-/data-lake``. Before the identity resolver these two
-    never matched, so the bucket reported ``dependents: none`` and ``risk:
-    low`` — it looked safe to delete when a role depended on it.
+    never matched, so the bucket reported ``dependents: none`` and a clean
+    verdict — it looked safe to delete when a role depended on it.
     """
     buffer = io.StringIO()
     with redirect_stdout(buffer):
@@ -210,7 +251,7 @@ def test_a_less_qualified_reference_reaches_the_stored_resource(
     # And the dependents that were previously invisible are now reported.
     assert report["dependents"], "the bucket must show its dependents"
     assert any(dependent["conclusion"] == "undocumented" for dependent in report["dependents"])
-    assert report["risk"] == "high"
+    assert report["verdict"] == "undocumented_dependents"
 
     # `why` resolves the same reference.
     buffer = io.StringIO()

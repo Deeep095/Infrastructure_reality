@@ -30,3 +30,9 @@ Thumbs.db
 plan.json
 reality-plan.json
 reality-state.json
+
+# Emulator runs (scripts/seed_emulator.py): generated state + dummy profile
+.emulator/
+
+# Graphify extraction and generated reports
+graphify-out/

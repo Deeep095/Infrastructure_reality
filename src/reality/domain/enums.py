@@ -38,6 +38,7 @@ class RelationshipType(_StrEnum):
     DEPENDS_ON = "depends_on"
     ATTACHED_TO = "attached_to"
     PERMISSION_ON = "permission_on"
+    USES_ROLE = "uses_role"
     CONTAINS = "contains"
     REFERENCES = "references"
 

@@ -6,7 +6,7 @@
 identity and evidence are modeled, and what each conclusion honestly means.
 
 ```
-terraform show -json ──┐
+terraform show -json ───┐
 aws (opt-in) read APIs ─┼─> adapters ──> ScanStore (SQLite) ──> reconcile ──> findings
 iam (opt-in)      ──────┤                     │
 cloudtrail (opt-in) ────┘                     └─> why / impact / simulate (reports)
@@ -14,35 +14,40 @@ cloudtrail (opt-in) ────┘                     └─> why / impact / s
 
 Module map:
 
-| Module | Responsibility |
-|---|---|
-| `reality.domain` | Frozen Pydantic models, enums, canonical-ID normalization (`ids.py`) |
+| Module             | Responsibility                                                                                 |
+| ------------------ | ---------------------------------------------------------------------------------------------- |
+| `reality.domain`   | Frozen Pydantic models, enums, canonical-ID normalization (`ids.py`)                           |
 | `reality.adapters` | `terraform` (local JSON only), `aws_resources`, `iam`, `cloudtrail` (injected clients, opt-in) |
-| `reality.storage` | SQLite connection, migrations, repositories (one transaction per scan) |
-| `reality.services` | `scan` (orchestration), `reconcile`, `hidden_dependencies`, `impact`, `reports` |
-| `reality.cli` | Argument parsing, the AWS opt-in gate, exit codes |
+| `reality.storage`  | SQLite connection, migrations, repositories (one transaction per scan)                         |
+| `reality.services` | `scan` (orchestration), `reconcile`, `hidden_dependencies`, `impact`, `reports`                |
+| `reality.cli`      | Argument parsing, the AWS opt-in gate, exit codes                                              |
 
 ## Supported scope
 
 **Resource types** (the vertical slice): EC2 instances, security groups,
 Lambda functions, RDS DB instances, S3 buckets, IAM roles. Terraform
-declarations for any *other* resource type are still recorded, typed
+declarations for any _other_ resource type are still recorded, typed
 `terraform_resource`, rather than dropped.
 
 **Evidence sources** and what each can prove:
 
-| Source | Input | Evidence kinds |
-|---|---|---|
-| `terraform_state` / `terraform_plan` | local `terraform show -json` files the user exported | config references (`depends_on`, security-group IDs, role ARNs) |
-| `aws_resources` | read/describe/list APIs (opt-in) | observed attributes (instance↔security-group attachments, function→role) |
-| `iam` | List/Get policy APIs (opt-in) | policy statements: *possible* permissions, never proof of use |
-| `cloudtrail` | `lookup_events` (opt-in, bounded window) | observed API usage linking a principal to a target |
+| Source                               | Input                                                | Evidence kinds                                                           |
+| ------------------------------------ | ---------------------------------------------------- | ------------------------------------------------------------------------ |
+| `terraform_state` / `terraform_plan` | local `terraform show -json` files the user exported | config references (`depends_on`, security-group IDs, role ARNs)          |
+| `aws_resources`                      | read/describe/list APIs (opt-in)                     | observed attributes (instance↔security-group attachments, function→role) |
+| `iam`                                | List/Get policy APIs (opt-in)                        | policy statements: _possible_ permissions, never proof of use            |
+| `cloudtrail`                         | `lookup_events` (opt-in, bounded window)             | observed API usage linking a principal to a target                       |
 
 **Relationship types**: `depends_on`, `attached_to`, `permission_on`,
-`contains`, `references`. Each relationship carries an **origin** —
+`uses_role`, `contains`, `references`. `permission_on` is an IAM authorization
+claim, not proof of runtime use; `uses_role` records a configured Lambda role.
+Each relationship carries an **origin** —
 `terraform_declared`, `aws_observed`, `iam_policy`, `cloudtrail` — because
 which world made a claim is part of the claim. Evidence strength is
-qualitative (`high`/`medium`/`low`/`unknown`), never a number.
+qualitative (`high`/`medium`/`low`/`unknown`), never a number. AWS adapters
+retain per-call coverage and a final completeness record; any failed sub-call
+keeps the adapter incomplete so a later success cannot hide the gap. This is
+conservative until coverage can be tied to individual relationship families.
 
 ## Canonical IDs
 
@@ -58,10 +63,10 @@ unresolved/-/-/-/-/arn:aws:s3:::data-lake/*
 Rules (`reality.domain.ids`):
 
 - **Three identity namespaces never merge implicitly.** `terraform/...`
-  (the address *is* the ID), `aws/...` (an ARN partition + the scan's native
+  (the address _is_ the ID), `aws/...` (an ARN partition + the scan's native
   IDs), and `unresolved/...` (wildcard ARNs, policy variables, hostnames).
   A declared `aws_instance.web` and the observed `i-0web` it manages are two
-  different identities until evidence joins them — the *only* joins are
+  different identities until evidence joins them — the _only_ joins are
   explicit: the `terraform_addresses` mapping a plan scan records (read by
   `simulate`) and the evidence-backed `identity_mappings` a scan computes
   (read by reconciliation, below). Names never join anything.
@@ -71,10 +76,10 @@ Rules (`reality.domain.ids`):
 - **No guessing.** Wildcards are rejected by `parse_arn` and must go through
   `unresolved()`, where they can never equal a resolved ID. Region-scoped
   resources require an explicit region to build. `safe_join` refuses naive
-  cross-account joins: region-scoped resources must match region *and*
+  cross-account joins: region-scoped resources must match region _and_
   account; a missing account never matches a known one.
 - **Refinement, never overwrite.** When later context (e.g. the STS account)
-  fills in a missing region/account, `refine` applies it; a *contradiction*
+  fills in a missing region/account, `refine` applies it; a _contradiction_
   raises instead of silently resolving.
 - The source-native identifier (native ID, ARN, Terraform address) is always
   preserved alongside the canonical key; parsing never destroys the original.
@@ -108,9 +113,9 @@ One SQLite file (default `reality.db`), one transaction per scan. Tables:
   findings. Nothing else.
 - **What is never stored**: credentials or secrets. Credentials stay in the
   environment / AWS credentials file / named profile the user supplies; the
-  database stores only the *name* of the profile inside coverage reasons.
+  database stores only the _name_ of the profile inside coverage reasons.
   Adapters extract only non-secret metadata (a `Name` tag, a function name);
-  the AWS fixtures deliberately contain secret-*shaped* values (Lambda
+  the AWS fixtures deliberately contain secret-_shaped_ values (Lambda
   environment variables, an RDS master-password field) and tests assert those
   values never appear in any persisted result.
 - **Retention**: rows are upserted idempotently (re-scanning the same input
@@ -149,7 +154,7 @@ conclusions are written as separate `findings` rows (stable IDs
 Run it with `reality reconcile [--scan-run N] [--output FORMAT]`. It is the only
 command besides `scan` that writes: it opens the database for writing, runs
 migrations on an existing file, and replaces the findings for the analysed run.
-A *missing* database is still an error (exit 5) — reconciling an empty file
+A _missing_ database is still an error (exit 5) — reconciling an empty file
 would report "nothing is undocumented", which is the one conclusion this tool
 must never be able to produce. Rendering is separated from the service
 (`reality.services.reports`) and supports `text`, `table`, `json`, `yaml`, and
@@ -172,20 +177,20 @@ authoritative, region and account included — or, only when the state carried
 no usable ARN, from a native ID that exactly one observed resource of the
 same type shares. Both identities are preserved; each mapping row points at
 its own `identity_match` evidence record and a plain-text reason. The pass
-groups candidates by *translated* triple (a Terraform identity replaced by
+groups candidates by _translated_ triple (a Terraform identity replaced by
 the AWS identity its mapping joins it to) and emits one finding per
 contributing (source, target) pair, so both namespaces keep their own
 finding rather than one invented identity replacing either.
 
 The five conclusions and their coverage gates:
 
-| Conclusion | Meaning | Requires |
-|---|---|---|
-| `confirmed` | declared and observed on the same triple | both sides present |
-| `undocumented` | observed, no declaration, Terraform was consulted | declared side available |
-| `possible` | IAM permission with no observed usage | CloudTrail available (only CloudTrail observes usage) |
-| `declared_only` | declared, not observed, an observed source was consulted | observed side available |
-| `unknown` | the coverage to decide was missing | — blocking sources recorded on the finding |
+| Conclusion      | Meaning                                                  | Requires                                              |
+| --------------- | -------------------------------------------------------- | ----------------------------------------------------- |
+| `confirmed`     | declared and observed on the same triple                 | both sides present                                    |
+| `undocumented`  | observed, no declaration, Terraform was consulted        | declared side available                               |
+| `possible`      | IAM permission with no observed usage                    | nothing: usage is data-plane, never visible to a scan |
+| `declared_only` | declared, not observed, an observed source was consulted | observed side available                               |
+| `unknown`       | the coverage to decide was missing                       | — blocking sources recorded on the finding            |
 
 `declared_only` is explicitly **not** evidence of inactivity. Hidden
 dependency reporting is a narrow projection of `undocumented` findings:
@@ -195,7 +200,7 @@ numbers.
 
 ## Impact and simulate
 
-`impact RESOURCE` reverse-traverses stored relationships (a *dependent* is
+`impact RESOURCE` reverse-traverses stored relationships (a _dependent_ is
 the source of an edge pointing into the radius): breadth-first, bounded by
 `--depth` (default 3), shortest path wins, parallel edges from one dependent
 aggregate (evidence union, most-cautionary classification — a blast radius is
@@ -203,12 +208,12 @@ a worst-case report), and the visited set is seeded with the subject so
 cycles and self-loops terminate. Each dependent is classified from its
 reconciliation finding:
 
-| Finding | Dependent kind |
-|---|---|
-| `confirmed` / `declared_only` | `documented` |
-| `undocumented` | `undocumented` |
-| `possible` | `possible` |
-| `unknown` or no finding | `unknown` (with a note naming the blocker or suggesting `reality reconcile`) |
+| Finding                       | Dependent kind                                                               |
+| ----------------------------- | ---------------------------------------------------------------------------- |
+| `confirmed` / `declared_only` | `documented`                                                                 |
+| `undocumented`                | `undocumented`                                                               |
+| `possible`                    | `possible`                                                                   |
+| `unknown` or no finding       | `unknown` (with a note naming the blocker or suggesting `reality reconcile`) |
 
 **Risk bands, documented rather than scored:**
 
@@ -216,12 +221,13 @@ reconciliation finding:
   something the declared world does not know about.
 - **MEDIUM** — known dependents of any other kind, or no dependents while
   relevant coverage is missing (absence of evidence is not evidence of
-  absence).
-- **LOW** — no dependents *and* the sources that could have revealed one
+  absence). IAM-policy-only grants are not counted as dependents.
+- **LOW** — no dependents _and_ the sources that could have revealed one
   were actually consulted. Relevant coverage is provider-based: a
   Terraform-namespace subject can only carry declared dependents, so the
   declared side (state **or** plan) suffices; any other subject also requires
-  `aws_resources`, `cloudtrail`, and `iam` individually.
+  `aws_resources` and `cloudtrail` individually. IAM policies are excluded
+  from runtime impact because a grant is not proof of usage.
 
 `simulate PLAN_JSON` parses a local plan file through the Terraform adapter
 (a JSON reader — Terraform is never executed), selects targets whose actions
@@ -237,8 +243,8 @@ Both commands accept `--json`: byte-stable output (sorted keys, no
 timestamps), so identical inputs produce identical bytes.
 
 **The CI gate.** `--fail-on {never,medium,high}` (default `never`) compares the
-report's risk band against a threshold and returns exit `6` when it is met or
-exceeded; `simulate` thresholds on its overall risk. The report itself is
+report's rule-based review band (not a calibrated risk score) against a threshold
+and returns exit `6` when it is met or exceeded; `simulate` thresholds on its overall risk. The report itself is
 printed identically either way, and the band is never recomputed for the gate —
 the gate reads the same number the human reads. The default is `never` so that
 adding the flag to an existing command cannot change its exit status; only a
@@ -251,7 +257,7 @@ Exit codes: `0` success · `2` usage error · `3` registered but not implemented
 
 ## Limitations of the AWS-side sources
 
-**IAM**: a policy allow is a *possible* permission, never proof of runtime
+**IAM**: a policy allow is a _possible_ permission, never proof of runtime
 use — only CloudTrail observes use. The slice covers **roles** (inline and
 attached managed policies, default version only), not users or groups.
 Wildcard resources, policy variables (`${...}`), and non-ARN strings cannot

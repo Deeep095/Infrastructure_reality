@@ -38,8 +38,12 @@ class RealityConfig(BaseModel):
         default=None,
         description="AWS region; must be explicit, never defaulted.",
     )
+    aws_endpoint_url: str | None = Field(
+        default=None,
+        description="Optional AWS-compatible emulator endpoint; never inferred.",
+    )
 
-    @field_validator("aws_profile", "aws_region")
+    @field_validator("aws_profile", "aws_region", "aws_endpoint_url")
     @classmethod
     def _empty_is_absent(cls, value: str | None) -> str | None:
         """An empty flag value is no selection at all, never an explicit one."""

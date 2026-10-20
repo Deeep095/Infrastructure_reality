@@ -355,13 +355,16 @@ def _database_check(path: Path) -> Check:
     )
 
 
-def _aws_checks(*, opt_in: bool, profile: str | None, region: str | None) -> list[Check]:
+def _aws_checks(
+    *, opt_in: bool, profile: str | None, region: str | None, endpoint_url: str | None = None
+) -> list[Check]:
     """Check the AWS side, but only as far as the safety contract allows.
 
     Without an explicit opt-in this reports the opt-in state and stops. It
     never resolves credentials, contacts STS, or touches a profile on its own:
     a diagnostic command that quietly reached the network would undercut the
-    guarantee the other commands make.
+    guarantee the other commands make. With ``endpoint_url`` the STS call goes
+    to that emulator, the same place a scan's calls would go.
     """
     if not opt_in:
         return [
@@ -416,8 +419,9 @@ def _aws_checks(*, opt_in: bool, profile: str | None, region: str | None) -> lis
             )
         ]
 
+    client_kwargs = {"endpoint_url": endpoint_url} if endpoint_url is not None else {}
     try:
-        identity = session.client("sts").get_caller_identity()
+        identity = session.client("sts", **client_kwargs).get_caller_identity()
     except Exception as err:  # noqa: BLE001 - doctor reports, it does not raise
         return [
             Check(
@@ -429,12 +433,13 @@ def _aws_checks(*, opt_in: bool, profile: str | None, region: str | None) -> lis
         ]
 
     account = identity.get("Account", "unknown")
+    via = f" via emulator {endpoint_url}" if endpoint_url is not None else ""
     checks.append(
         Check(
             name="aws",
             status="ok",
             detail=(
-                f"profile {profile!r} in {region} resolves to account {account} "
+                f"profile {profile!r} in {region}{via} resolves to account {account} "
                 f"as {identity.get('Arn', 'an unknown principal')}"
             ),
         )

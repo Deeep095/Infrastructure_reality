@@ -24,6 +24,7 @@ from pathlib import Path
 from pydantic import BaseModel, ConfigDict
 
 from reality.config import RealityConfig
+from reality.dependencies import render_dependencies
 from reality.settings import (
     Check,
     _aws_checks,
@@ -81,6 +82,7 @@ def run_doctor(
             opt_in=config.aws_opt_in,
             profile=config.aws_profile,
             region=config.aws_region,
+            endpoint_url=config.aws_endpoint_url,
         )
     )
     checks.append(_terraform_check())
@@ -92,14 +94,17 @@ def render_doctor(report: DoctorReport) -> str:
 
     Status words are padded rather than coloured so the output stays readable
     when piped, and the remedy is on the same line as the problem it fixes.
+    The dependency section follows the checks: "which extras do I have, and
+    what do they buy me?" is the other half of "can this machine run it?".
     """
     glyphs = {"ok": "  ok  ", "warn": " warn ", "fail": " FAIL ", "skip": " skip "}
     lines = [f"reality: doctor (settings: {report.settings_path})"]
     for check in report.checks:
-        line = f"{glyphs[check.status]} {check.name:<12} {check.detail}"
-        lines.append(line)
+        lines.append(f"{glyphs[check.status]} {check.name:<12} {check.detail}")
         if check.remedy and check.status != "ok":
             lines.append(f"         -> {check.remedy}")
+    lines.append("")
+    lines.append(render_dependencies().rstrip("\n"))
     lines.append("")
     if report.failures:
         failed = ", ".join(check.name for check in report.failures)
