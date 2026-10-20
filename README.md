@@ -42,6 +42,33 @@ absence from a report does not mean a resource or dependency is absent from AWS.
 
 Python 3.12+.
 
+### Install from PyPI
+
+Once the first release is published, end users can install the CLI without
+cloning this repository:
+
+```bash
+python -m pip install reality-infrastructure
+```
+
+This installs the `reality` command:
+
+```bash
+reality --version
+reality doctor
+```
+
+For live AWS discovery:
+
+```bash
+python -m pip install "reality-infrastructure[aws]"
+```
+
+The PyPI distribution is named `reality-infrastructure` because the shorter
+`reality` name is already owned by an unrelated package.
+
+### Development install
+
 ```bash
 pip install -e .            # core (local Terraform parsing + storage + reports)
 pip install -e .[aws]       # + boto3, for the optional AWS discovery sources

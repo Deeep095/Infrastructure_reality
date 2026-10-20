@@ -36,3 +36,6 @@ reality-state.json
 
 # Graphify extraction and generated reports
 graphify-out/
+
+# Distribution artifacts
+dist/

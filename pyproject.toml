@@ -3,10 +3,26 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "reality"
+name = "reality-infrastructure"
 version = "0.1.0"
 description = "Read-only cloud infrastructure discovery and local blast-radius simulation"
 requires-python = ">=3.12"
+readme = "README.md"
+license = { file = "LICENSE" }
+authors = [
+    { name = "Deepanshu" },
+]
+keywords = ["aws", "cloud", "terraform", "infrastructure", "blast-radius", "drift"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: GNU General Public License v3 (GPLv3)",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: System :: Distributed Computing",
+]
 dependencies = [
     "pydantic>=2.5,<3",
 ]
@@ -36,6 +52,26 @@ packages = ["src/reality"]
 
 [tool.hatch.build.targets.wheel.force-include]
 "src/reality/py.typed" = "reality/py.typed"
+
+[tool.hatch.build.targets.sdist]
+include = [
+    "src/reality/**",
+    "README.md",
+    "LICENSE",
+    "docs/**",
+    "comparison.md",
+    "pyproject.toml",
+]
+exclude = [
+    "Atest/**",
+    "ManualTests/**",
+    ".claude/**",
+    ".kilo/**",
+    ".vscode/**",
+    "graphify-out/**",
+    "scripts/**",
+    "tests/**",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
